@@ -10,6 +10,10 @@ def test_load_settings_reads_network_and_git_proxy_config() -> None:
     assert settings.api.port == 8000
     assert settings.qdrant.url == "http://127.0.0.1:6333"
     assert settings.sqlite.database_path == "./data/balatro_cn.db"
+    assert settings.embedding.provider == "ollama"
+    assert settings.embedding.base_url == "http://127.0.0.1:11434"
+    assert settings.embedding.model == "qwen3-embedding:8b"
+    assert settings.embedding.batch_size == 16
     assert settings.git.clone_timeout_seconds == 600
     assert settings.git.http_proxy == "http://127.0.0.1:7890"
     assert settings.git.https_proxy == "http://127.0.0.1:7890"

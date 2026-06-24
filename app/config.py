@@ -70,7 +70,10 @@ class ModelSettings:
 
 
 @dataclass(frozen=True)
-class EmbeddingSettings(ModelSettings):
+class EmbeddingSettings:
+    provider: str
+    base_url: str
+    model: str
     batch_size: int
 
 
