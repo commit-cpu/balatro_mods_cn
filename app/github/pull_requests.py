@@ -33,14 +33,22 @@ def pr_title(mod: ModConfig, commit_sha: str) -> str:
 
 def pr_body(mod: ModConfig, commit_sha: str, unit_count: int) -> str:
     """Generate a PR body describing the translation update."""
+    short_sha = commit_sha[:7]
+    commit_url = f"https://github.com/{mod.origin.slug}/commit/{commit_sha}"
     return (
+        f"## Simplified Chinese localization update\n\n"
+        f"This PR updates the Simplified Chinese localization for upstream "
+        f"`{mod.origin.branch}` commit [`{short_sha}`]({commit_url}).\n\n"
+        f"- Translation units updated: **{unit_count}**\n"
+        f"- Target file: `{mod.target_locale_path}`\n\n"
+        f"Generated automatically by the Balatro CN localization bot.\n\n"
+        f"---\n\n"
         f"## 简体中文翻译更新\n\n"
-        f"自动翻译了上游 `{mod.origin.branch}` 分支的 "
-        f"[`{commit_sha[:7]}`](https://github.com/{mod.origin.slug}/commit/{commit_sha}) "
-        f"提交。\n\n"
-        f"- 翻译单元数：**{unit_count}**\n"
+        f"本 PR 更新了简体中文本地化，对应上游 `{mod.origin.branch}` 分支提交 "
+        f"[`{short_sha}`]({commit_url})。\n\n"
+        f"- 更新翻译单元数：**{unit_count}**\n"
         f"- 目标文件：`{mod.target_locale_path}`\n\n"
-        f"🤖 由 Balatro CN 翻译机器人自动生成。"
+        f"由 Balatro CN 翻译机器人自动生成。"
     )
 
 
