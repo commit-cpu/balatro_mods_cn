@@ -1,0 +1,1 @@
+"""Balatro localization worker package."""

@@ -1,0 +1,21 @@
+id: example_mod
+
+origin:
+  owner: upstream-owner
+  repo: example-mod
+  branch: main
+
+fork:
+  owner: your-bot-owner
+  repo: example-mod
+
+publish_mode: fork_only
+
+source_locale_paths:
+  - localization/en-us.lua
+  - localization/en.lua
+
+target_locale_path: localization/zh_CN.lua
+
+poll_minutes: 360
+parser_profile: steamodded_lua_v1

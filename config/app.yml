@@ -1,0 +1,61 @@
+app:
+  env: development
+  data_dir: ./data
+
+api:
+  host: 127.0.0.1
+  port: 8000
+
+worker:
+  name: balatro-cn-worker
+  poll_interval_seconds: 5
+  max_retry_attempts: 3
+  job_visibility_timeout_seconds: 900
+
+sqlite:
+  database_path: ./data/balatro_cn.db
+  busy_timeout_ms: 5000
+  journal_mode: WAL
+  synchronous: NORMAL
+
+qdrant:
+  url: http://127.0.0.1:6333
+  grpc_url: http://127.0.0.1:6334
+  collection: tm_bge_m3_v1
+  timeout_seconds: 30
+
+embedding:
+  model: BAAI/bge-m3
+  device: cuda
+  batch_size: 32
+
+reranker:
+  model: BAAI/bge-reranker-v2-m3
+  device: cuda
+  use_fp16: true
+
+rag:
+  dense_top_k: 30
+  fts_top_k: 20
+  rerank_top_k: 16
+  reference_limit: 4
+
+llm:
+  base_url: https://api.deepseek.com
+  translation_model: deepseek-chat
+  review_model: deepseek-chat
+
+git:
+  repos_dir: ./data/repos
+  clone_timeout_seconds: 600
+  default_branch: main
+  http_proxy: ${GIT_HTTP_PROXY:-http://127.0.0.1:7890}
+  https_proxy: ${GIT_HTTPS_PROXY:-http://127.0.0.1:7890}
+  no_proxy: ${GIT_NO_PROXY:-127.0.0.1,localhost}
+
+github:
+  bot_owner: your-bot-owner-or-org
+
+scheduler:
+  enabled: true
+  poll_minutes: 360

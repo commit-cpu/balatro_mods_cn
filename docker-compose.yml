@@ -1,0 +1,16 @@
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: balatro-cn-qdrant
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY}
+      QDRANT__SERVICE__READ_ONLY_API_KEY: ${QDRANT_READ_ONLY_API_KEY}
+      QDRANT__LOG_LEVEL: INFO
+      QDRANT__STORAGE__SNAPSHOTS_PATH: /qdrant/snapshots
+    volumes:
+      - ./data/qdrant/storage:/qdrant/storage
+      - ./data/qdrant/snapshots:/qdrant/snapshots
