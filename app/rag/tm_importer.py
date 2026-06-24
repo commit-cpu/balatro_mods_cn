@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -131,8 +132,11 @@ def _build_entry(
 
     source_hash = _sha256(source_text)
     target_hash = _sha256(target_text)
-    qdrant_point_id = _sha256(
-        f"{mod_id}:{source_unit.unit_key}:{source_hash}:{target_hash}"
+    qdrant_point_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"balatro-cn:{mod_id}:{source_unit.unit_key}:{source_hash}:{target_hash}",
+        )
     )
 
     return {

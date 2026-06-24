@@ -1,4 +1,5 @@
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 
@@ -39,7 +40,7 @@ def test_import_locale_pair_writes_tm_entries_and_outbox(tmp_path: Path) -> None
         outbox_count = db.execute("select count(*) as c from vector_outbox").fetchone()["c"]
         row = db.execute(
             """
-            select source_text, target_text, token_signature
+            select source_text, target_text, token_signature, qdrant_point_id
             from tm_entries
             where unit_key like '%text[0]'
             """
@@ -50,6 +51,7 @@ def test_import_locale_pair_writes_tm_entries_and_outbox(tmp_path: Path) -> None
     assert row["source_text"] == "{C:mult}+#1#{} Mult"
     assert row["target_text"] == "{C:mult}+#1#{} 倍率"
     assert row["token_signature"] == "style_mult|var_1|style_reset"
+    assert str(UUID(row["qdrant_point_id"])) == row["qdrant_point_id"]
 
 
 def test_import_locale_pair_skips_token_mismatches(tmp_path: Path) -> None:
