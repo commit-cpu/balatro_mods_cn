@@ -3,7 +3,11 @@ from pathlib import Path
 from app.config import load_settings
 
 
-def test_load_settings_reads_network_and_git_proxy_config() -> None:
+def test_load_settings_reads_network_and_git_proxy_config(monkeypatch) -> None:
+    monkeypatch.delenv("GIT_HTTP_PROXY", raising=False)
+    monkeypatch.delenv("GIT_HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("GIT_NO_PROXY", raising=False)
+
     settings = load_settings(Path("config/app.yml"))
 
     assert settings.api.host == "127.0.0.1"
@@ -20,7 +24,11 @@ def test_load_settings_reads_network_and_git_proxy_config() -> None:
     assert settings.git.no_proxy == "127.0.0.1,localhost"
 
 
-def test_git_proxy_env_returns_cli_compatible_proxy_variables() -> None:
+def test_git_proxy_env_returns_cli_compatible_proxy_variables(monkeypatch) -> None:
+    monkeypatch.delenv("GIT_HTTP_PROXY", raising=False)
+    monkeypatch.delenv("GIT_HTTPS_PROXY", raising=False)
+    monkeypatch.delenv("GIT_NO_PROXY", raising=False)
+
     settings = load_settings(Path("config/app.yml"))
 
     assert settings.git.proxy_env() == {

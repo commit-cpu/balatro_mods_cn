@@ -32,6 +32,7 @@ Token types found in Balatro localization strings:
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import ClassVar
 
@@ -153,7 +154,12 @@ def protect_for_llm(text: str) -> tuple[str, list[str]]:
     return _build_prompt_safe(text, tokens), [t.raw for t in tokens]
 
 
-def restore_tokens(llm_output: str, original_tokens: list[str]) -> str:
+def restore_tokens(
+    llm_output: str,
+    original_tokens: list[str],
+    *,
+    allow_reorder: bool = False,
+) -> str:
     """Replace ``[[TOKEN_n]]`` placeholders with the original token text.
 
     Raises :class:`TokenMismatchError` if the count or order differs.
@@ -172,7 +178,13 @@ def restore_tokens(llm_output: str, original_tokens: list[str]) -> str:
 
     found_order = [idx for idx, _, _ in found]
     expected_order = list(range(len(original_tokens)))
-    if found_order != expected_order:
+    if allow_reorder:
+        if sorted(found_order) != expected_order:
+            raise TokenMismatchError(
+                f"Token identity mismatch: LLM returned {found_order}, "
+                f"expected one each of {expected_order}"
+            )
+    elif found_order != expected_order:
         raise TokenMismatchError(
             f"Token order mismatch: LLM returned {found_order}, expected {expected_order}"
         )
@@ -190,7 +202,12 @@ def restore_tokens(llm_output: str, original_tokens: list[str]) -> str:
     return result
 
 
-def validate_token_identity(original: str, translated: str) -> list[str]:
+def validate_token_identity(
+    original: str,
+    translated: str,
+    *,
+    order_sensitive: bool = True,
+) -> list[str]:
     """Check that *translated* contains exactly the same tokens as *original*.
 
     Returns a list of error messages (empty = valid).
@@ -207,11 +224,16 @@ def validate_token_identity(original: str, translated: str) -> list[str]:
             f"Token count mismatch: original={len(orig_raws)}, translated={len(trans_raws)}"
         )
 
-    for i, (o, t) in enumerate(zip(orig_raws, trans_raws)):
-        if o != t:
-            errors.append(
-                f"Token [{i}] mismatch: expected {o!r}, got {t!r}"
-            )
+    if order_sensitive:
+        for i, (o, t) in enumerate(zip(orig_raws, trans_raws)):
+            if o != t:
+                errors.append(
+                    f"Token [{i}] mismatch: expected {o!r}, got {t!r}"
+                )
+    elif Counter(orig_raws) != Counter(trans_raws):
+        errors.append(
+            f"Token inventory mismatch: original={orig_raws!r}, translated={trans_raws!r}"
+        )
 
     # Also check for any remaining unmatched tokens
     if len(orig_raws) > len(trans_raws):

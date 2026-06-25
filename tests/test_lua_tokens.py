@@ -145,6 +145,11 @@ class TestRestoreTokens:
         with pytest.raises(TokenMismatchError):
             restore_tokens(safe, ["{C:mult}", "#1#"])
 
+    def test_reordered_placeholders_can_be_restored_when_allowed(self) -> None:
+        safe = "先[[TOKEN_1]]再[[TOKEN_0]]"
+        restored = restore_tokens(safe, ["{C:mult}", "{}"], allow_reorder=True)
+        assert restored == "先{}再{C:mult}"
+
     def test_no_placeholders(self) -> None:
         restored = restore_tokens("Plain text", [])
         assert restored == "Plain text"
@@ -172,6 +177,14 @@ class TestValidateTokenIdentity:
             "#1#+{C:mult}{} 倍率",
         )
         assert len(errors) >= 1
+
+    def test_order_mismatch_can_pass_when_order_is_not_sensitive(self) -> None:
+        errors = validate_token_identity(
+            "{C:mult}+#1#{} Mult",
+            "#1#+{C:mult}{} 倍率",
+            order_sensitive=False,
+        )
+        assert errors == []
 
     def test_no_tokens_both_sides(self) -> None:
         errors = validate_token_identity("Hello", "你好")

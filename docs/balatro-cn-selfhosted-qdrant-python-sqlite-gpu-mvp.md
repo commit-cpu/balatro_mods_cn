@@ -1,10 +1,13 @@
 # Balatro 模组中文本地化自动化平台
 ## 自建服务器版 MVP：Python + SQLite + Qdrant + 本地 GPU RAG
 
-> 版本：Self-hosted MVP v1.0  
-> 更新：2026-06-24  
+> 版本：Self-hosted MVP v1.1
+> 更新：2026-06-25
 > 定位：单服务器、自建向量数据库、AI 主导翻译与反馈闭环。  
 > 本文替代此前“SQLite BLOB + NumPy 检索”的本地版方案。
+
+> 当前代码进度、entry 级翻译预览流程、JSONL 契约、patchability 规则和下一步计划见
+> [`docs/current-translation-pipeline.md`](current-translation-pipeline.md)。
 
 ---
 

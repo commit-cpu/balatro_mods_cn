@@ -2,6 +2,9 @@
 
 Worker-first scaffold for the self-hosted Balatro mod Chinese localization MVP.
 
+Current implementation notes are maintained in
+[`docs/current-translation-pipeline.md`](docs/current-translation-pipeline.md).
+
 ## Layout
 
 - `app/worker.py` - Python worker entrypoint.
@@ -10,6 +13,8 @@ Worker-first scaffold for the self-hosted Balatro mod Chinese localization MVP.
 - `.env.example` - secret and local override template.
 - `docker-compose.yml` - local Qdrant service bound to `127.0.0.1`.
 - `data/repos/` - git clone/fetch working directory.
+- `docs/current-translation-pipeline.md` - current RAG translation preview flow,
+  JSONL contract, patchability rules, and project progress.
 
 ## Start Qdrant
 
@@ -58,6 +63,49 @@ Sync pending vectors to Qdrant and run a search:
 ```bash
 uv run python -m app.cli.main sync-vectors --limit 100
 uv run python -m app.cli.main search "Gain +#1# Mult" --top-k 5
+```
+
+## Translation Preview
+
+`translate-preview-mod` and `translate-entry-preview-mod` use an
+OpenAI-compatible chat API. Configure it in `.env`:
+
+```bash
+LLM_API_KEY=replace_me
+LLM_BASE_URL=https://api.openai.com/v1
+LLM_TRANSLATION_MODEL=gpt-4.1-mini
+LLM_CONCURRENCY=1
+```
+
+Run a dry-run entry preview without writing back to Lua:
+
+```bash
+bash -lc 'set -a; source .env; set +a; uv run --frozen python -m app.cli.main translate-entry-preview-mod \
+  --repo data/repos/EricTheToon__Fortlatro/Fortlatro \
+  --source localization/default.lua \
+  --limit 20 \
+  --top-k 5 \
+  --max-width 18 \
+  --concurrency 1 \
+  --output data/artifacts/fortlatro_entry_translate_preview.jsonl'
+```
+
+The entry preview uses multi-query dense RAG plus deterministic glossary
+references. It writes `ok`, `patchable`, `patch_warnings`, and `target_units`
+for the future Lua write-back step. See
+[`docs/current-translation-pipeline.md`](docs/current-translation-pipeline.md)
+for the full JSONL contract and design details.
+
+The older line-by-line preview is still available for debugging individual
+strings:
+
+```bash
+bash -lc 'set -a; source .env; set +a; uv run --frozen python -m app.cli.main translate-preview-mod \
+  --repo data/repos/EricTheToon__Fortlatro/Fortlatro \
+  --source localization/default.lua \
+  --limit 20 \
+  --top-k 5 \
+  --output data/artifacts/fortlatro_translate_preview.jsonl'
 ```
 
 ## Git Proxy
