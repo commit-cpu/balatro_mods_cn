@@ -330,7 +330,7 @@ LLM 返回完整未换行中文字符串，程序负责换行。
 3. 如果 `apply_mode=table`，可以加 `--table-level` 写回整段数组；行数变化本身不是质量问题。
 4. `needs_review=true` 的条目先人工或再次翻译处理；除非明确接受风险，不加 `--include-needs-review`。
 5. `apply-entry-preview` 会先写临时文件并验证 Lua，再替换输出文件；不会覆盖 source 路径。
-6. 写回后对任意 mod 运行 `audit-entry-output`，检查 Lua 语法、preview 跳过项、英文残留、未翻译项、同 key 的 description name / misc label 不一致、以及相同英文 name/label 多译；这个审查不依赖具体 mod 的硬编码词。
+6. 写回后对任意 mod 运行 `audit-entry-output`，检查 Lua 语法、preview 跳过项、英文残留、未翻译项、同 key 的 description name / misc label 不一致、以及相同英文 name/label 多译；这个审查不依赖具体 mod 的硬编码词。`residual_english` / `untranslated_units` 会带 `severity=rerun|review`，其中 acronym、疑似专名等低置信项只作为 `review` 提示，不默认进入重跑清单。
 
 当前行为：
 
@@ -427,7 +427,7 @@ uv run --frozen pytest -q
    - 支持下一批翻译复用，避免每次重新猜译名。
 
 2. 问题 entry 重跑
-   - `audit-rerun-keys` 从 `audit-entry-output` 的 failed / needs_review / residual English / untranslated / label-name mismatch / name inconsistency 输出中生成重跑清单。
+   - `audit-rerun-keys` 从 `audit-entry-output` 的 failed / needs_review / residual English / untranslated / label-name mismatch / name inconsistency 输出中生成重跑清单；`severity=review` 的英文残留和未翻译项不会默认重跑。
    - `translate-entry-preview-mod --entry-keys-file --context-preview` 只重跑清单里的 entry，并把旧 preview 中已通过 rows 作为 mod-local glossary/context；过滤模式下不使用默认 `--limit 20` 截断清单。
    - `merge-entry-preview` 用重跑结果替换原 preview 中同 `entry_key` 的 rows，并把新增 rows 追加到末尾。
    - 重跑时仍带上当前批次的 mod-local glossary 和 label/name 对照。

@@ -2293,10 +2293,24 @@ def test_audit_rerun_keys_writes_generic_entry_key_list(tmp_path) -> None:
                     {"entry_key": "descriptions.Joker.j_review"},
                 ],
                 "residual_english": [
-                    {"unit_key": "descriptions.Other.p_pack.text[0]"},
+                    {
+                        "unit_key": "descriptions.Other.p_pack.text[0]",
+                        "severity": "rerun",
+                    },
+                    {
+                        "unit_key": "descriptions.Joker.j_acronym.name",
+                        "severity": "review",
+                    },
                 ],
                 "untranslated_units": [
-                    {"unit_key": "misc.v_dictionary.a_stock"},
+                    {
+                        "unit_key": "misc.v_dictionary.a_stock",
+                        "severity": "rerun",
+                    },
+                    {
+                        "unit_key": "descriptions.Joker.j_rna.name",
+                        "severity": "review",
+                    },
                 ],
                 "label_name_mismatches": [
                     {
@@ -2345,6 +2359,70 @@ def test_audit_rerun_keys_writes_generic_entry_key_list(tmp_path) -> None:
         "misc.labels.sample",
     ]
     assert "Wrote 8 rerun entry keys" in result.output
+
+
+def test_audit_entry_output_classifies_residual_english_severity(tmp_path) -> None:
+    source = tmp_path / "localization" / "en-us.lua"
+    source.parent.mkdir()
+    source.write_text(
+        """return {
+    descriptions={
+        Joker={
+            j_english={name="English Joker", text={"Gain Chips"}},
+            j_mixed={name="Mixed Joker", text={"Gain Chips"}},
+            j_acronym={name="H.A.M Radio", text={"Uses code"}},
+            j_rna={name="RNA", text={"Copies DNA"}},
+        },
+    },
+}
+""",
+        encoding="utf-8",
+    )
+    target = tmp_path / "localization" / "zh_CN.lua"
+    target.write_text(
+        """return {
+    descriptions={
+        Joker={
+            j_english={name="English Joker", text={"Gain Chips"}},
+            j_mixed={name="混合小丑", text={"获得 Chips"}},
+            j_acronym={name="H.A.M 电台", text={"使用代码"}},
+            j_rna={name="RNA", text={"复制 DNA"}},
+        },
+    },
+}
+""",
+        encoding="utf-8",
+    )
+    report = tmp_path / "audit.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "audit-entry-output",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/en-us.lua",
+            "--target",
+            "localization/zh_CN.lua",
+            "--json-output",
+            str(report),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    by_key = {item["unit_key"]: item for item in payload["residual_english"]}
+    assert by_key["descriptions.Joker.j_english.name"]["severity"] == "rerun"
+    assert by_key["descriptions.Joker.j_english.text[0]"]["severity"] == "rerun"
+    assert by_key["descriptions.Joker.j_mixed.text[0]"]["severity"] == "rerun"
+    assert by_key["descriptions.Joker.j_acronym.name"]["severity"] == "review"
+    assert by_key["descriptions.Joker.j_rna.name"]["severity"] == "review"
+    untranslated = {
+        item["unit_key"]: item for item in payload["untranslated_units"]
+    }
+    assert untranslated["descriptions.Joker.j_english.name"]["severity"] == "rerun"
+    assert untranslated["descriptions.Joker.j_rna.name"]["severity"] == "review"
 
 
 def test_merge_entry_preview_replaces_rows_by_entry_key(tmp_path) -> None:

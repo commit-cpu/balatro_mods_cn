@@ -790,6 +790,8 @@ def _audit_rerun_keys(report: dict[str, object]) -> list[str]:
 
     for section in ("residual_english", "untranslated_units"):
         for item in _dict_items(report.get(section)):
+            if item.get("severity") == "review":
+                continue
             add(_entry_key_from_unit_key(item.get("unit_key")))
 
     for item in _dict_items(report.get("label_name_mismatches")):
@@ -852,16 +854,8 @@ def _audit_entry_output(
         if row.get("ok") and row.get("needs_review")
     ]
 
-    residual_english = [
-        {"unit_key": unit.unit_key, "text": unit.source_text}
-        for unit in target_units
-        if _has_residual_english(unit.source_text)
-    ]
-    untranslated_units = [
-        {"unit_key": key, "text": target_text}
-        for key, target_text in sorted(target_by_key.items())
-        if source_by_key.get(key) == target_text and _has_residual_english(target_text)
-    ]
+    residual_english = _residual_english_items(target_units)
+    untranslated_units = _untranslated_unit_items(source_by_key, target_by_key)
     label_name_mismatches = _label_name_mismatches(target_units)
     name_inconsistencies = _name_inconsistencies(source_by_key, target_by_key)
 
@@ -889,11 +883,138 @@ def _audit_entry_output(
     }
 
 
+def _residual_english_items(units: list) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for unit in units:
+        severity = _residual_english_severity_for_unit(unit.unit_key, unit.source_text)
+        if severity is None:
+            continue
+        items.append(
+            {
+                "unit_key": unit.unit_key,
+                "text": unit.source_text,
+                "severity": severity,
+            }
+        )
+    return items
+
+
+def _residual_english_severity_for_unit(unit_key: str, text: str) -> str | None:
+    severity = _residual_english_severity(text)
+    if (
+        severity == "rerun"
+        and unit_key.endswith(".name")
+        and _looks_like_acronym_text(text)
+    ):
+        return "review"
+    return severity
+
+
+def _untranslated_unit_items(
+    source_by_key: dict[str, str],
+    target_by_key: dict[str, str],
+) -> list[dict[str, str]]:
+    items: list[dict[str, str]] = []
+    for key, target_text in sorted(target_by_key.items()):
+        if source_by_key.get(key) != target_text:
+            continue
+        severity = _untranslated_unit_severity(key, target_text)
+        if severity is None:
+            continue
+        items.append({"unit_key": key, "text": target_text, "severity": severity})
+    return items
+
+
+def _untranslated_unit_severity(unit_key: str, text: str) -> str | None:
+    if _residual_english_severity(text) is None:
+        return None
+    if unit_key.endswith(".name") and _looks_like_acronym_text(text):
+        return "review"
+    return "rerun"
+
+
 def _has_residual_english(text: str) -> bool:
+    return _residual_english_severity(text) is not None
+
+
+def _residual_english_severity(text: str) -> str | None:
     stripped = re.sub(r"\{[^{}]*\}", " ", text)
     stripped = re.sub(r"#\d+#", " ", stripped)
     stripped = re.sub(r"\bX(?=\d|\s*$)", " ", stripped)
-    return re.search(r"[A-Za-z][A-Za-z0-9_.?'-]{2,}", stripped) is not None
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_.?'-]{2,}", stripped)
+    if not words:
+        return None
+    if not re.search(r"[\u3400-\u9fff]", stripped):
+        return "rerun"
+    if any(_is_gameplay_english_word(word) for word in words):
+        return "rerun"
+    if all(_looks_like_proper_english_fragment(word) for word in words):
+        return "review"
+    return "rerun"
+
+
+def _is_gameplay_english_word(word: str) -> bool:
+    normalized = word.strip(".,!?;:()[]{}'\"").casefold()
+    return normalized in {
+        "add",
+        "adds",
+        "after",
+        "and",
+        "becomes",
+        "card",
+        "cards",
+        "chip",
+        "chips",
+        "creates",
+        "discard",
+        "edition",
+        "every",
+        "gain",
+        "gains",
+        "hand",
+        "held",
+        "level",
+        "mult",
+        "played",
+        "rank",
+        "round",
+        "score",
+        "selected",
+        "until",
+        "use",
+        "uses",
+        "when",
+    }
+
+
+def _looks_like_proper_english_fragment(word: str) -> bool:
+    cleaned = word.strip(".,!?;:()[]{}'\"")
+    if not cleaned:
+        return False
+    letters = re.sub(r"[^A-Za-z]", "", cleaned)
+    if len(letters) >= 2 and letters.upper() == letters:
+        return True
+    return cleaned[0].isupper() and cleaned[1:].lower() == cleaned[1:]
+
+
+def _looks_like_acronym_text(text: str) -> bool:
+    stripped = re.sub(r"\{[^{}]*\}", " ", text)
+    stripped = re.sub(r"#\d+#", " ", stripped).strip()
+    if not stripped:
+        return False
+    words = re.findall(r"[A-Za-z][A-Za-z0-9_.?'-]*", stripped)
+    if not words:
+        return False
+    non_words = re.sub(r"[A-Za-z0-9_.?'\-\s]", "", stripped)
+    if non_words:
+        return False
+    return all(_looks_like_acronym_word(word) for word in words)
+
+
+def _looks_like_acronym_word(word: str) -> bool:
+    cleaned = word.strip(".,!?;:()[]{}'\"")
+    letters = re.sub(r"[^A-Za-z]", "", cleaned)
+    return len(letters) >= 2 and letters.upper() == letters
 
 
 def _label_name_mismatches(units: list) -> list[dict[str, str]]:
