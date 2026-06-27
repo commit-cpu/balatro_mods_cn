@@ -361,6 +361,9 @@ uv run --frozen python -m app.cli.main translate-entry-preview-mod --repo ... --
 uv run --frozen python -m app.cli.main apply-entry-preview --repo ... --source ... --input ... --output localization/zh_CN.lua
 uv run --frozen python -m app.cli.main apply-entry-preview --repo ... --source ... --input ... --output localization/zh_CN.lua --table-level
 uv run --frozen python -m app.cli.main audit-entry-output --repo ... --source ... --target localization/zh_CN.lua --preview data/artifacts/..._entry_translate_preview.jsonl --json-output data/artifacts/..._entry_translate_audit.json
+uv run --frozen python -m app.cli.main audit-rerun-keys --audit data/artifacts/..._entry_translate_audit.json --output data/artifacts/..._rerun_keys.txt
+uv run --frozen python -m app.cli.main translate-entry-preview-mod --repo ... --source ... --entry-keys-file data/artifacts/..._rerun_keys.txt --context-preview data/artifacts/..._entry_translate_preview.jsonl --output data/artifacts/..._entry_translate_rerun.jsonl
+uv run --frozen python -m app.cli.main merge-entry-preview --base data/artifacts/..._entry_translate_preview.jsonl --updates data/artifacts/..._entry_translate_rerun.jsonl --output data/artifacts/..._entry_translate_preview_merged.jsonl
 ```
 
 术语与质量（Phase 1）：
@@ -424,8 +427,10 @@ uv run --frozen pytest -q
    - 支持下一批翻译复用，避免每次重新猜译名。
 
 2. 问题 entry 重跑
-   - 从 `audit-entry-output` 的 failed / needs_review / residual English / untranslated 输出中生成重跑清单。
-   - 重跑时带上已通过 rows 的 mod-local glossary 和 label/name 对照。
+   - `audit-rerun-keys` 从 `audit-entry-output` 的 failed / needs_review / residual English / untranslated / label-name mismatch / name inconsistency 输出中生成重跑清单。
+   - `translate-entry-preview-mod --entry-keys-file --context-preview` 只重跑清单里的 entry，并把旧 preview 中已通过 rows 作为 mod-local glossary/context；过滤模式下不使用默认 `--limit 20` 截断清单。
+   - `merge-entry-preview` 用重跑结果替换原 preview 中同 `entry_key` 的 rows，并把新增 rows 追加到末尾。
+   - 重跑时仍带上当前批次的 mod-local glossary 和 label/name 对照。
 
 3. 完整质量评审
    - 当前 entry preview 已有一次 naturalness/meaning reviewer 自动重译。

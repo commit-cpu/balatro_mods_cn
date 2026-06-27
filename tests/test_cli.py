@@ -25,6 +25,8 @@ def test_cli_has_rag_commands() -> None:
     assert "build-style-pack" in result.output
     assert "apply-entry-preview" in result.output
     assert "audit-entry-output" in result.output
+    assert "audit-rerun-keys" in result.output
+    assert "merge-entry-preview" in result.output
     assert "rag-preview-mod" in result.output
     assert "translate-preview-mod" in result.output
     assert "translate-entry-preview-mod" in result.output
@@ -447,6 +449,109 @@ def test_translate_entry_preview_mod_runs_llm_calls_concurrently_in_source_order
     ]
     assert [row["text"] for row in rows] == [["first entry-zh"], ["second entry-zh"]]
     assert all(row["ok"] is True for row in rows)
+
+
+def test_translate_entry_preview_mod_filters_entry_keys_file(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+    keys_file = tmp_path / "rerun_keys.txt"
+    keys_file.write_text("descriptions.Joker.j_b\n", encoding="utf-8")
+    context_preview = tmp_path / "base_preview.jsonl"
+    context_preview.write_text(
+        json.dumps(
+            {
+                "entry_key": "descriptions.Other.m_custom",
+                "ok": True,
+                "needs_review": False,
+                "source": {"name": "Custom Seal", "text": ["Adds Custom Seal"]},
+                "name": "自定义蜡封",
+                "text": ["添加自定义蜡封"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            assert path == source
+            return [
+                FakeUnit("descriptions.Joker.j_a.name", "A"),
+                FakeUnit("descriptions.Joker.j_a.text[0]", "first entry"),
+                FakeUnit("descriptions.Joker.j_b.name", "B"),
+                FakeUnit("descriptions.Joker.j_b.text[0]", "second entry"),
+            ]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate_entry(self, *, name_text, body_text, style_examples, **kwargs):
+            assert name_text == "B"
+            assert body_text == "second entry"
+            assert "Custom Seal -> 自定义蜡封" in style_examples
+
+            class Result:
+                name = "B-zh"
+                text = ["second entry-zh"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "9999",
+            "--entry-keys-file",
+            str(keys_file),
+            "--context-preview",
+            str(context_preview),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "entry_filter=1" in result.output
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert [row["entry_key"] for row in rows] == ["descriptions.Joker.j_b"]
+    assert rows[0]["text"] == ["second entry-zh"]
 
 
 def test_translate_entry_preview_mod_logs_parallel_failure_summary(
@@ -2168,11 +2273,129 @@ def test_audit_entry_output_reports_generic_post_apply_issues(tmp_path) -> None:
     payload = json.loads(report.read_text(encoding="utf-8"))
     assert payload["summary"]["failed"] == 1
     assert payload["summary"]["needs_review"] == 1
-    assert {
-        "entry_key": "m_custom",
-        "description_name": "自定义蜡封",
-        "label": "自定义封印",
-    } in payload["label_name_mismatches"]
+    mismatch = payload["label_name_mismatches"][0]
+    assert mismatch["entry_key"] == "m_custom"
+    assert mismatch["description_entry_key"] == "descriptions.Other.m_custom"
+    assert mismatch["label_unit_key"] == "misc.labels.m_custom"
+    assert mismatch["description_name"] == "自定义蜡封"
+    assert mismatch["label"] == "自定义封印"
+
+
+def test_audit_rerun_keys_writes_generic_entry_key_list(tmp_path) -> None:
+    audit = tmp_path / "audit.json"
+    audit.write_text(
+        json.dumps(
+            {
+                "failed_rows": [
+                    {"entry_key": "descriptions.Joker.j_failed"},
+                ],
+                "needs_review_rows": [
+                    {"entry_key": "descriptions.Joker.j_review"},
+                ],
+                "residual_english": [
+                    {"unit_key": "descriptions.Other.p_pack.text[0]"},
+                ],
+                "untranslated_units": [
+                    {"unit_key": "misc.v_dictionary.a_stock"},
+                ],
+                "label_name_mismatches": [
+                    {
+                        "entry_key": "m_custom",
+                        "description_entry_key": "descriptions.Other.m_custom",
+                        "label_unit_key": "misc.labels.m_custom",
+                    },
+                ],
+                "name_inconsistencies": [
+                    {
+                        "source": "Sample",
+                        "entry_keys": [
+                            "descriptions.Other.sample",
+                            "misc.labels.sample",
+                        ],
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "rerun_keys.txt"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "audit-rerun-keys",
+            "--audit",
+            str(audit),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert output.read_text(encoding="utf-8").splitlines() == [
+        "descriptions.Joker.j_failed",
+        "descriptions.Joker.j_review",
+        "descriptions.Other.p_pack",
+        "misc.v_dictionary.a_stock",
+        "descriptions.Other.m_custom",
+        "misc.labels.m_custom",
+        "descriptions.Other.sample",
+        "misc.labels.sample",
+    ]
+    assert "Wrote 8 rerun entry keys" in result.output
+
+
+def test_merge_entry_preview_replaces_rows_by_entry_key(tmp_path) -> None:
+    base = tmp_path / "base.jsonl"
+    updates = tmp_path / "updates.jsonl"
+    output = tmp_path / "merged.jsonl"
+    base.write_text(
+        "\n".join(
+            json.dumps(row, ensure_ascii=False)
+            for row in [
+                {"entry_key": "a", "text": ["old a"]},
+                {"entry_key": "b", "text": ["old b"]},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    updates.write_text(
+        "\n".join(
+            json.dumps(row, ensure_ascii=False)
+            for row in [
+                {"entry_key": "b", "text": ["new b"]},
+                {"entry_key": "c", "text": ["new c"]},
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "merge-entry-preview",
+            "--base",
+            str(base),
+            "--updates",
+            str(updates),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert rows == [
+        {"entry_key": "a", "text": ["old a"]},
+        {"entry_key": "b", "text": ["new b"]},
+        {"entry_key": "c", "text": ["new c"]},
+    ]
+    assert "replaced=1" in result.output
+    assert "appended=1" in result.output
 
 
 def test_llm_config_prefers_environment(monkeypatch) -> None:

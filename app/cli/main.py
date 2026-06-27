@@ -285,6 +285,39 @@ def audit_entry_output(
     _print_audit_items("Name inconsistencies", report["name_inconsistencies"], "source")
 
 
+@app.command("audit-rerun-keys")
+def audit_rerun_keys(
+    audit: Path = typer.Option(..., exists=True, dir_okay=False),
+    output: Path = typer.Option(...),
+) -> None:
+    """Write entry keys that should be retranslated from an audit JSON report."""
+    report = json.loads(audit.read_text(encoding="utf-8"))
+    keys = _audit_rerun_keys(report)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text("\n".join(keys) + ("\n" if keys else ""), encoding="utf-8")
+    console.print(f"Wrote {len(keys)} rerun entry keys to {output}")
+
+
+@app.command("merge-entry-preview")
+def merge_entry_preview(
+    base: Path = typer.Option(..., exists=True, dir_okay=False),
+    updates: Path = typer.Option(..., exists=True, dir_okay=False),
+    output: Path = typer.Option(...),
+) -> None:
+    """Merge updated entry preview rows into a base preview JSONL file."""
+    base_rows = _read_preview_rows(base)
+    update_rows = _read_preview_rows(updates)
+    merged_rows, replaced, appended = _merge_preview_rows(base_rows, update_rows)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as file:
+        for row in merged_rows:
+            file.write(json.dumps(row, ensure_ascii=False) + "\n")
+    console.print(
+        f"Merged entry preview: base={len(base_rows)} updates={len(update_rows)} "
+        f"replaced={replaced} appended={appended} output={output}"
+    )
+
+
 @app.command("apply-entry-preview")
 def apply_entry_preview(
     repo: Path = typer.Option(..., exists=True, file_okay=False),
@@ -512,17 +545,24 @@ def translate_entry_preview_mod(
     top_k: int = typer.Option(5, min=1),
     max_width: int = typer.Option(18, min=4),
     concurrency: int | None = typer.Option(None, min=1),
+    entry_keys_file: Path | None = typer.Option(None, exists=True, dir_okay=False),
+    context_preview: Path | None = typer.Option(None, exists=True, dir_okay=False),
 ) -> None:
     load_dotenv()
     settings = load_settings()
     llm_concurrency = _llm_concurrency(concurrency)
     source_path = repo / source
     units = LuaExtractor().extract_file(source_path)
-    entries = [
+    all_entries = [
         entry
         for entry in group_translation_units(units)
         if entry.name is not None or entry.text or entry.unlock
-    ][:limit]
+    ]
+    entry_filter = _read_entry_key_filter(entry_keys_file)
+    if entry_filter is not None:
+        entries = [entry for entry in all_entries if entry.entry_key in entry_filter]
+    else:
+        entries = all_entries[:limit]
     embedder = OllamaEmbeddingClient(
         base_url=settings.embedding.base_url,
         model=settings.embedding.model,
@@ -543,7 +583,8 @@ def translate_entry_preview_mod(
         f"repo={repo} source={source} entries={len(entries)} top_k={top_k} "
         f"max_width={max_width} concurrency={llm_concurrency} model={llm_model} "
         f"base_url={llm_base_url} locked_terms={len(term_map)} "
-        f"brief_version={brief_version} output={output}"
+        f"brief_version={brief_version} entry_filter={len(entry_filter) if entry_filter is not None else 0} "
+        f"output={output}"
     )
 
     work_items: list[EntryWorkItem] = []
@@ -604,10 +645,14 @@ def translate_entry_preview_mod(
         term_map=term_map,
         max_workers=llm_concurrency,
     )
-    name_context = _render_mod_name_glossary(work_items, pretranslated_names)
+    context_rows = _read_preview_rows(context_preview) if context_preview is not None else []
+    name_context = _join_prompt_contexts(
+        _render_mod_name_glossary(work_items, pretranslated_names),
+        _render_preview_translation_context(context_rows),
+    )
     console.print(
         f"Name glossary entries={len(pretranslated_names)} "
-        f"failed={name_failures}"
+        f"failed={name_failures} context_rows={len(context_rows)}"
     )
 
     stats = _empty_preview_stats()
@@ -678,6 +723,105 @@ def _read_preview_rows(path: Path) -> list[dict[str, object]]:
             if isinstance(row, dict):
                 rows.append(row)
     return rows
+
+
+def _read_entry_key_filter(path: Path | None) -> set[str] | None:
+    if path is None:
+        return None
+    keys: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key = line.strip()
+        if not key or key.startswith("#"):
+            continue
+        keys.add(key)
+    return keys
+
+
+def _merge_preview_rows(
+    base_rows: list[dict[str, object]],
+    update_rows: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], int, int]:
+    updates_by_key: dict[str, dict[str, object]] = {}
+    update_order: list[str] = []
+    for row in update_rows:
+        key = row.get("entry_key")
+        if not isinstance(key, str):
+            continue
+        if key not in updates_by_key:
+            update_order.append(key)
+        updates_by_key[key] = row
+
+    replaced = 0
+    seen: set[str] = set()
+    merged: list[dict[str, object]] = []
+    for row in base_rows:
+        key = row.get("entry_key")
+        if isinstance(key, str) and key in updates_by_key:
+            merged.append(updates_by_key[key])
+            seen.add(key)
+            replaced += 1
+        else:
+            merged.append(row)
+
+    appended = 0
+    for key in update_order:
+        if key in seen:
+            continue
+        merged.append(updates_by_key[key])
+        appended += 1
+    return merged, replaced, appended
+
+
+def _audit_rerun_keys(report: dict[str, object]) -> list[str]:
+    keys: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: object) -> None:
+        if not isinstance(value, str) or not value:
+            return
+        if value in seen:
+            return
+        seen.add(value)
+        keys.append(value)
+
+    for section in ("failed_rows", "needs_review_rows"):
+        for item in _dict_items(report.get(section)):
+            add(item.get("entry_key"))
+
+    for section in ("residual_english", "untranslated_units"):
+        for item in _dict_items(report.get(section)):
+            add(_entry_key_from_unit_key(item.get("unit_key")))
+
+    for item in _dict_items(report.get("label_name_mismatches")):
+        add(item.get("description_entry_key"))
+        add(item.get("label_unit_key"))
+
+    for item in _dict_items(report.get("name_inconsistencies")):
+        entry_keys = item.get("entry_keys")
+        if isinstance(entry_keys, list):
+            for key in entry_keys:
+                add(key)
+
+    return keys
+
+
+def _dict_items(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _entry_key_from_unit_key(value: object) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    if value.startswith("descriptions."):
+        match = re.match(r"^(descriptions\.[^.]+\.[^.]+)(?:\.(?:name|text|unlock)(?:\[\d+\])?)?$", value)
+        if match:
+            return match.group(1)
+    misc_match = re.match(r"^(misc\.[^.]+\.[^\[]+)(?:\[\d+\])?$", value)
+    if misc_match:
+        return misc_match.group(1)
+    return value
 
 
 def _audit_entry_output(
@@ -753,25 +897,30 @@ def _has_residual_english(text: str) -> bool:
 
 
 def _label_name_mismatches(units: list) -> list[dict[str, str]]:
-    names: dict[str, str] = {}
-    labels: dict[str, str] = {}
+    names: dict[str, tuple[str, str]] = {}
+    labels: dict[str, tuple[str, str]] = {}
     for unit in units:
         match = re.match(r"^descriptions\.[^.]+\.([^.]+)\.name$", unit.unit_key)
         if match:
-            names[match.group(1)] = unit.source_text
+            entry_key = unit.unit_key.removesuffix(".name")
+            names[match.group(1)] = (entry_key, unit.source_text)
             continue
         match = re.match(r"^misc\.labels\.([^.]+)$", unit.unit_key)
         if match:
-            labels[match.group(1)] = unit.source_text
+            labels[match.group(1)] = (unit.unit_key, unit.source_text)
 
     mismatches: list[dict[str, str]] = []
     for key in sorted(set(names) & set(labels)):
-        if names[key] != labels[key]:
+        description_entry_key, description_name = names[key]
+        label_unit_key, label = labels[key]
+        if description_name != label:
             mismatches.append(
                 {
                     "entry_key": key,
-                    "description_name": names[key],
-                    "label": labels[key],
+                    "description_entry_key": description_entry_key,
+                    "label_unit_key": label_unit_key,
+                    "description_name": description_name,
+                    "label": label,
                 }
             )
     return mismatches
@@ -782,6 +931,7 @@ def _name_inconsistencies(
     target_by_key: dict[str, str],
 ) -> list[dict[str, object]]:
     by_source: dict[str, set[str]] = {}
+    keys_by_source: dict[str, set[str]] = {}
     display_source: dict[str, str] = {}
     for key, source_text in source_by_key.items():
         if not _is_name_like_unit(key):
@@ -794,6 +944,7 @@ def _name_inconsistencies(
             continue
         display_source.setdefault(norm, source_text)
         by_source.setdefault(norm, set()).add(target_text)
+        keys_by_source.setdefault(norm, set()).add(_entry_key_from_unit_key(key) or key)
 
     result: list[dict[str, object]] = []
     for norm, targets in sorted(by_source.items()):
@@ -802,6 +953,7 @@ def _name_inconsistencies(
                 {
                     "source": display_source[norm],
                     "targets": sorted(targets),
+                    "entry_keys": sorted(keys_by_source.get(norm, set())),
                 }
             )
     return result
@@ -1597,6 +1749,40 @@ def _append_translation_contexts(style_examples: str, *contexts: str) -> str:
     if not style_examples or style_examples == "(none)":
         return context
     return f"{style_examples}\n\n{context}"
+
+
+def _join_prompt_contexts(*contexts: str) -> str:
+    return "\n\n".join(context for context in contexts if context)
+
+
+def _render_preview_translation_context(rows: list[dict[str, object]]) -> str:
+    accepted_rows = [
+        row
+        for row in rows
+        if row.get("ok") is True and row.get("needs_review") is not True
+    ]
+    if not accepted_rows:
+        return ""
+    lines = [
+        "Mod-local accepted translations from previous preview:",
+        "Use these translations consistently for names, labels, and derived terms.",
+    ]
+    for row in accepted_rows:
+        source = row.get("source")
+        if not isinstance(source, dict):
+            continue
+        entry_key = row.get("entry_key")
+        source_name = source.get("name")
+        target_name = row.get("name")
+        if isinstance(source_name, str) and isinstance(target_name, str):
+            lines.append(f"- {source_name} -> {target_name} ({entry_key})")
+            lines.append(f"  If source says {source_name} Card, use {target_name}牌.")
+        source_text = " ".join(_source_field_strings(source.get("text")))
+        target_text = " ".join(_source_field_strings(row.get("text")))
+        if source_text and target_text:
+            lines.append(f"  EN text: {source_text}")
+            lines.append(f"  ZH text: {target_text}")
+    return "\n".join(lines) if len(lines) > 2 else ""
 
 
 def _render_group_translation_context(rows: list[dict[str, object]]) -> str:
