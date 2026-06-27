@@ -29,6 +29,7 @@ from app.llm.style_pack import (
 from app.lua.extractor import LuaExtractor, _context_label
 from app.lua.grouping import group_translation_units
 from app.lua.patcher import LuaPatcher, PatchInstruction
+from app.lua.string_literals import escape_lua_string_content
 from app.lua.table_writer import EntryTableTranslation, build_entry_table_patches
 from app.lua.validator import validate_file
 from app.rag.ollama_embeddings import OllamaEmbeddingClient
@@ -330,7 +331,7 @@ def apply_entry_preview(
             unit_key=key,
             byte_start=unit_by_key[key].byte_start,
             byte_end=unit_by_key[key].byte_end,
-            new_text=value,
+            new_text=escape_lua_string_content(value),
         )
         for key, value in sorted(translations.items())
     ]

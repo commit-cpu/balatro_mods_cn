@@ -312,6 +312,7 @@ LLM 返回完整未换行中文字符串，程序负责换行。
 - 旧 preview JSONL 如果没有 `apply_mode`，apply 阶段会从 `patchable`、`patch_warnings` 和目标/译文行数差异推断 `unit` / `table` / `blocked`。
 
 两种模式都会写到新的输出文件，不覆盖 source；写出前会做 patch span diff 校验和 LuaJIT 语法校验。
+写回前会统一把 preview 字符串转换为 Lua-safe string content：清理 LLM 偶发生成的内嵌 CR/LF、合并多余空白、转义反斜杠和引号，避免 `"..."` 字符串被真实换行截断。
 
 ## 并发设计
 

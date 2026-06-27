@@ -39,3 +39,34 @@ def test_build_entry_table_patches_replaces_text_table_with_new_line_count() -> 
     assert '"找到这张牌"' in patched
     assert '"再打出它"' in patched
     assert '"Hello"' not in patched
+
+
+def test_build_entry_table_patches_normalizes_embedded_newlines() -> None:
+    source = b"""return {
+    descriptions={
+        Other={
+            p_test={
+                name="Test Pack",
+                text={"Choose one"},
+            },
+        },
+    },
+}
+"""
+
+    patches, errors = build_entry_table_patches(
+        source,
+        [
+            EntryTableTranslation(
+                entry_key="descriptions.Other.p_test",
+                name="神圣包",
+                text=["从最多{C:attention}#2#{}张神圣牌中\n"],
+                unlock=[],
+            )
+        ],
+    )
+    patched = LuaPatcher().patch(source, patches).decode("utf-8")
+
+    assert errors == []
+    assert '"从最多{C:attention}#2#{}张神圣牌中"' in patched
+    assert '"从最多{C:attention}#2#{}张神圣牌中\\n"' not in patched

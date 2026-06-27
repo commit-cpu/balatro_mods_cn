@@ -11,6 +11,7 @@ from app.lua.extractor import (
     _string_content,
 )
 from app.lua.patcher import PatchInstruction
+from app.lua.string_literals import escape_lua_string_content
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +102,7 @@ def _append_name_patch(
             unit_key=f"{entry.entry_key}.name",
             byte_start=start,
             byte_end=end,
-            new_text=_escape_lua_string_content(entry.name or ""),
+            new_text=escape_lua_string_content(entry.name or ""),
         )
     )
 
@@ -145,7 +146,7 @@ def _format_lua_string_array(
 ) -> str:
     lines = ["{"]
     for value in values:
-        lines.append(f'{item_indent}"{_escape_lua_string_content(value)}",')
+        lines.append(f'{item_indent}"{escape_lua_string_content(value)}",')
     lines.append(f"{field_indent}}}")
     return "\n".join(lines)
 
@@ -154,12 +155,3 @@ def _line_indent(source: bytes, byte_offset: int) -> str:
     line_start = source.rfind(b"\n", 0, byte_offset) + 1
     line = source[line_start:byte_offset].decode("utf-8")
     return line[: len(line) - len(line.lstrip(" \t"))]
-
-
-def _escape_lua_string_content(value: str) -> str:
-    return (
-        value.replace("\\", "\\\\")
-        .replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("\r", "\\r")
-    )

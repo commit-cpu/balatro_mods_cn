@@ -1941,6 +1941,65 @@ def test_apply_entry_preview_keeps_existing_output_when_lua_validation_fails(
     assert not output.with_name(output.name + ".tmp").exists()
 
 
+def test_apply_entry_preview_normalizes_embedded_newlines_for_unit_patch(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text(
+        """return {
+    descriptions={Other={p_test={name="Test Pack", text={"Choose one"}}}},
+}
+""",
+        encoding="utf-8",
+    )
+    preview = tmp_path / "preview.jsonl"
+    preview.write_text(
+        json.dumps(
+            {
+                "entry_key": "descriptions.Other.p_test",
+                "ok": True,
+                "patchable": True,
+                "needs_review": False,
+                "target_units": {
+                    "name": "descriptions.Other.p_test.name",
+                    "text": ["descriptions.Other.p_test.text[0]"],
+                    "unlock": [],
+                },
+                "name": "神圣包",
+                "text": ["从最多{C:attention}#2#{}张神圣牌中\n"],
+                "unlock": [],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "localization" / "zh_CN.lua"
+    monkeypatch.setattr("app.cli.main.validate_file", lambda path: (True, ""))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "apply-entry-preview",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--input",
+            str(preview),
+            "--output",
+            "localization/zh_CN.lua",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    patched = output.read_text(encoding="utf-8")
+    assert '"从最多{C:attention}#2#{}张神圣牌中"' in patched
+    assert '"从最多{C:attention}#2#{}张神圣牌中\n"' not in patched
+
+
 def test_apply_entry_preview_table_level_applies_line_count_changes(
     monkeypatch,
     tmp_path,
