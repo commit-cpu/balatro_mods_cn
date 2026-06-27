@@ -40,7 +40,7 @@
 - RAG 参考分层：locked glossary / same-context / loose，prompt 分段渲染。
 - `build-style-pack` 可从 `Balatro__Origin` 预构建官方中英对照风格包，默认写入 `app/llm/assets/balatro_origin_style_pack.json`；当前资产包含 12 个 description 类别，每类至少 10 条参考。
 - `apply-entry-preview` 可从 preview JSONL 生成新的 `zh_CN.lua`；默认只写安全子集，传 `--table-level` 时支持 `text[]` / `unlock[]` 行数变化。
-- name prepass 会过滤明显误导的非原版单词级引用，并为 label-only 条目直接生成 name preview，避免空 body 被 LLM 生成说明文字后触发 token error。
+- name prepass 会过滤明显误导的非原版跨类别 name 引用和单词级引用，并为 label-only 条目直接生成 name preview，避免空 body 被 LLM 生成说明文字后触发 token error。
 
 ## 数据与服务
 
@@ -130,7 +130,7 @@ bash -lc 'set -a; source .env; set +a; uv run --frozen python -m app.cli.main tr
    - `blocked`: 结构不完整、LLM 失败或缺少必需字段，不能安全写回。
 13. 写出 JSONL 预览，不修改 Lua。
 
-name prepass 使用当前 entry 的 RAG/glossary refs，但会过滤容易污染复合名称的非原版单词级引用。例如 `Gilded Seal` 不应被 `partner_api` 的 `Gilded -> 黄金伙伴` 带偏。它还会从 frozen locked term map 中提取原版组合词模式：如果存在多条 `* Seal -> *蜡封`，则向 name prompt 添加 `Seal -> 蜡封` 和若干 `Gold Seal -> 金色蜡封` 之类的同模式参考。
+name prepass 使用当前 entry 的 RAG/glossary refs，但会过滤容易污染名称的非原版跨类别引用。entry 的期望类别从 `descriptions.<Category>` 动态推导为 `<category>_name` / `<category>_description_line`，所以 Sleeve、Partner、Seal、Enhanced 等自定义类别不需要硬编码。精确同名引用只有来自 `balatro_origin` 或同 context 时才进入 name prompt；例如 Enhanced 的 `Gilded` 不应被 Partner 的 `Gilded -> 黄金伙伴` 带偏。复合名称中的非原版单词级引用也会被过滤，例如 `Gilded Seal` 不应被 `partner_api` 的 `Gilded -> 黄金伙伴` 带偏。它还会从 frozen locked term map 中提取原版组合词模式：如果存在多条 `* Seal -> *蜡封`，则向 name prompt 添加 `Seal -> 蜡封` 和若干 `Gold Seal -> 金色蜡封` 之类的同模式参考。
 
 重跑问题 entry 时，`--context-preview` 会从旧 preview 中读取 `ok=true && needs_review=false` 的 name/label 对照。如果某个英文 name 在旧 preview 中只有一个中文译名，翻译器会把它作为 name prepass seed 直接复用；若旧 preview 自己已经多译，则不会自动选边，交由 audit 的 name inconsistency 处理。
 

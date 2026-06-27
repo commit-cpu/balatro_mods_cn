@@ -8,6 +8,7 @@ from app.cli.main import (
     _entry_style_examples,
     _llm_concurrency,
     _llm_config,
+    _name_prepass_allows_reference,
     app,
 )
 from app.db.migrate import migrate
@@ -133,6 +134,45 @@ def test_apply_preview_consistency_uses_mod_name_for_styled_card_terms() -> None
     assert rows[1]["text"] == ["将卡牌转化为{C:attention}彩色玻璃牌{}。"]
     assert rows[1]["needs_review"] is False
     assert rows[1]["review"]["consistency_warnings"] == []
+
+
+def test_name_prepass_rejects_unrelated_exact_context_reference() -> None:
+    class Ref:
+        source_text = "Gilded"
+        mod_id = "partner_api"
+        context_type = "partner_name"
+
+    assert not _name_prepass_allows_reference(
+        "Gilded",
+        Ref(),
+        expected_context_types={"enhanced_name"},
+    )
+
+
+def test_name_prepass_allows_same_context_exact_reference() -> None:
+    class Ref:
+        source_text = "Gilded"
+        mod_id = "some_mod"
+        context_type = "enhanced_name"
+
+    assert _name_prepass_allows_reference(
+        "Gilded",
+        Ref(),
+        expected_context_types={"enhanced_name"},
+    )
+
+
+def test_name_prepass_allows_origin_exact_reference_across_contexts() -> None:
+    class Ref:
+        source_text = "Seal"
+        mod_id = "balatro_origin"
+        context_type = "other_name"
+
+    assert _name_prepass_allows_reference(
+        "Seal",
+        Ref(),
+        expected_context_types={"enhanced_name"},
+    )
 
 
 def test_entry_style_examples_prefers_tm_custom_category_before_official_fallback(
@@ -1028,6 +1068,102 @@ def test_translate_entry_preview_mod_uses_name_prepass_for_label_only_entries(
     assert row["name"] == "使魔蜡封"
     assert row["text"] == []
     assert row["token_errors"] == []
+
+
+def test_translate_entry_preview_name_prepass_ignores_unrelated_exact_context_refs(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Enhanced.m_gilded.name", "Gilded"),
+                FakeUnit(
+                    "descriptions.Enhanced.m_gilded.text[0]",
+                    "{C:money}$#1#{} when held in hand",
+                ),
+            ]
+
+    class BadRef:
+        tm_entry_id = 10
+        score = 1.0
+        mod_id = "partner_api"
+        unit_key = "descriptions.Partner.pnr_partner_gilded.name"
+        context_type = "partner_name"
+        source_text = "Gilded"
+        target_text = "黄金伙伴"
+
+    class FakeRetrieval:
+        references = [BadRef()]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class NameResult:
+        candidate_text = "镀金"
+        token_errors = []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate(self, *, source_text, references):
+            assert source_text == "Gilded"
+            pairs = {(ref.source_text, ref.target_text) for ref in references}
+            assert ("Gilded", "黄金伙伴") not in pairs
+            return NameResult()
+
+        def translate_entry(self, **kwargs):
+            class Result:
+                name = "镀金"
+                text = ["在手牌中时获得{C:money}$#1#{}"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr("app.cli.main._entry_style_examples", lambda **kwargs: "")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["name"] == "镀金"
 
 
 def test_translate_entry_preview_mod_seeds_name_prepass_from_context_preview(

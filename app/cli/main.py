@@ -1654,17 +1654,32 @@ def _name_translation_references(
     raw_refs = [
         ref
         for ref in item.references
-        if _name_prepass_allows_reference(source_name, ref)
+        if _name_prepass_allows_reference(
+            source_name,
+            ref,
+            expected_context_types=_entry_expected_context_types(item.entry.entry_key),
+        )
     ]
     retrieval_refs = _translation_references(raw_refs, tier_by_id=item.tier_by_id)
     return _dedupe_translation_references(pattern_refs + retrieval_refs)
 
 
-def _name_prepass_allows_reference(source_name: str, ref: object) -> bool:
+def _name_prepass_allows_reference(
+    source_name: str,
+    ref: object,
+    *,
+    expected_context_types: set[str] | None = None,
+) -> bool:
     ref_source = getattr(ref, "source_text", "")
     if not isinstance(ref_source, str) or not ref_source.strip():
         return False
     if ref_source.casefold() == source_name.casefold():
+        ref_mod = getattr(ref, "mod_id", "")
+        ref_context = getattr(ref, "context_type", "")
+        if ref_mod == "balatro_origin":
+            return True
+        if expected_context_types and ref_context not in expected_context_types:
+            return False
         return True
 
     source_words = source_name.split()
