@@ -4,6 +4,8 @@ Worker-first scaffold for the self-hosted Balatro mod Chinese localization MVP.
 
 Current implementation notes are maintained in
 [`docs/current-translation-pipeline.md`](docs/current-translation-pipeline.md).
+Translation quality risks and the next context strategy are tracked in
+[`docs/translation-quality-context-strategy.md`](docs/translation-quality-context-strategy.md).
 
 ## Layout
 
@@ -15,6 +17,8 @@ Current implementation notes are maintained in
 - `data/repos/` - git clone/fetch working directory.
 - `docs/current-translation-pipeline.md` - current RAG translation preview flow,
   JSONL contract, patchability rules, and project progress.
+- `docs/translation-quality-context-strategy.md` - quality issues, mod-level
+  context strategy, and recommended next architecture.
 
 ## Start Qdrant
 
@@ -91,10 +95,53 @@ bash -lc 'set -a; source .env; set +a; uv run --frozen python -m app.cli.main tr
 ```
 
 The entry preview uses multi-query dense RAG plus deterministic glossary
-references. It writes `ok`, `patchable`, `patch_warnings`, and `target_units`
-for the future Lua write-back step. See
+references, and injects style references from the prebuilt official Balatro
+EN/ZH style pack plus same-category translated TM examples for custom mod
+categories such as `Sleeve`. Before translating full entries, it pretranslates
+all mod `name` fields, builds a mod-wide EN/ZH name glossary, and feeds that
+glossary back into every entry so labels, names, and descriptions stay aligned.
+Name pretranslation also uses original Balatro name patterns such as
+`Gold Seal -> 金色蜡封` to infer suffix terms like `Seal -> 蜡封`.
+
+The command prints per-entry queued/done/failed logs with RAG tier counts, style
+reference counts, token errors, review retry state, `apply_mode`, and a final
+preview summary so parallel runs are auditable. Rebuild the official style pack
+after updating the origin repo:
+
+```bash
+uv run --frozen python -m app.cli.main build-style-pack \
+  --repo data/repos/Balatro__Origin
+```
+
+The preview writes `ok`, `needs_review`, `apply_mode`, `apply_warnings`,
+legacy-compatible `patchable` / `patch_warnings`, and `target_units` for the
+Lua write-back step. See
 [`docs/current-translation-pipeline.md`](docs/current-translation-pipeline.md)
 for the full JSONL contract and design details.
+
+Apply reviewed preview rows to a new `zh_CN.lua` without overwriting the source
+file:
+
+```bash
+uv run --frozen python -m app.cli.main apply-entry-preview \
+  --repo data/repos/EricTheToon__Fortlatro/Fortlatro \
+  --source localization/default.lua \
+  --input data/artifacts/fortlatro_entry_translate_preview.jsonl \
+  --output localization/zh_CN.lua
+```
+
+Use `--table-level` after review when you want to include entries whose
+`apply_mode` is `table`, usually because `text[]` or `unlock[]` line counts
+changed during natural Chinese reflow:
+
+```bash
+uv run --frozen python -m app.cli.main apply-entry-preview \
+  --repo data/repos/EricTheToon__Fortlatro/Fortlatro \
+  --source localization/default.lua \
+  --input data/artifacts/fortlatro_entry_translate_preview.jsonl \
+  --output localization/zh_CN.lua \
+  --table-level
+```
 
 The older line-by-line preview is still available for debugging individual
 strings:

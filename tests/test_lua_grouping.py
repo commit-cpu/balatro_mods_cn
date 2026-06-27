@@ -34,3 +34,22 @@ def test_group_translation_units_by_entry_key() -> None:
     ]
     assert [unit.source_text for unit in groups[0].unlock] == ["Find this Joker"]
     assert groups[0].combined_text == "Gain +#1# Mult at end of round"
+
+
+def test_group_translation_units_includes_misc_scalars_and_quips() -> None:
+    groups = group_translation_units(
+        [
+            _unit("misc.labels.fam_aureate", "Aureate"),
+            _unit("misc.dictionary.k_fam_plus_planet", "+1 Planet"),
+            _unit("misc.quips.dq_1[0]", "Yikes!"),
+            _unit("misc.quips.dq_1[1]", "Good luck!"),
+        ]
+    )
+
+    by_key = {group.entry_key: group for group in groups}
+    assert by_key["misc.labels.fam_aureate"].name.source_text == "Aureate"
+    assert by_key["misc.dictionary.k_fam_plus_planet"].name.source_text == "+1 Planet"
+    assert [unit.source_text for unit in by_key["misc.quips.dq_1"].text] == [
+        "Yikes!",
+        "Good luck!",
+    ]

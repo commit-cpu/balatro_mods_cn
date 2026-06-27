@@ -3,7 +3,15 @@ import json
 import threading
 import time
 
-from app.cli.main import _llm_concurrency, _llm_config, app
+from app.cli.main import (
+    _apply_preview_consistency,
+    _entry_style_examples,
+    _llm_concurrency,
+    _llm_config,
+    app,
+)
+from app.db.migrate import migrate
+from app.llm.style_pack import StyleCategory, StyleExample, StylePack
 
 
 def test_cli_has_rag_commands() -> None:
@@ -14,9 +22,178 @@ def test_cli_has_rag_commands() -> None:
     assert "import-local-tm" in result.output
     assert "sync-vectors" in result.output
     assert "search" in result.output
+    assert "build-style-pack" in result.output
+    assert "apply-entry-preview" in result.output
     assert "rag-preview-mod" in result.output
     assert "translate-preview-mod" in result.output
     assert "translate-entry-preview-mod" in result.output
+
+
+def test_build_style_pack_command_writes_json(monkeypatch, tmp_path) -> None:
+    repo = tmp_path / "origin"
+    repo.mkdir()
+    output = tmp_path / "style_pack.json"
+
+    class FakePack:
+        class Category:
+            minimum_met = True
+
+        categories = {"joker": Category()}
+
+        def to_dict(self):
+            return {
+                "source_mod_id": "balatro_origin",
+                "source_locale_path": "localization/en-us.lua",
+                "target_locale_path": "localization/zh_CN.lua",
+                "categories": {
+                    "joker": {
+                        "category": "joker",
+                        "available_count": 12,
+                        "minimum_required": 10,
+                        "minimum_met": True,
+                        "examples": [],
+                    }
+                },
+            }
+
+    def fake_build_style_pack(**kwargs):
+        assert kwargs["repo"] == repo
+        assert kwargs["source"] == "localization/en-us.lua"
+        assert kwargs["target"] == "localization/zh_CN.lua"
+        assert kwargs["min_per_category"] == 10
+        assert kwargs["max_per_category"] == 1000
+        return FakePack()
+
+    monkeypatch.setattr("app.cli.main.build_style_pack", fake_build_style_pack)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "build-style-pack",
+            "--repo",
+            str(repo),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["categories"]["joker"]["available_count"] == 12
+    assert "Style pack categories=1" in result.output
+
+
+def test_apply_preview_consistency_uses_mod_name_for_styled_card_terms() -> None:
+    rows = [
+        {
+            "entry_key": "descriptions.Enhanced.m_fam_stained_glass",
+            "ok": True,
+            "name": "彩色玻璃",
+            "text": ["每次计分时获得版本"],
+            "unlock": [],
+            "source": {"name": "Stained Glass", "text": [], "unlock": []},
+            "review": {
+                "term_violations": [],
+                "consistency_warnings": [],
+                "naturalness_warnings": [],
+                "meaning_warnings": [],
+                "rewrite_hint": "",
+                "retry_history": [],
+            },
+            "needs_review": False,
+        },
+        {
+            "entry_key": "descriptions.Familiar_Tarots.c_fam_vengeance",
+            "ok": True,
+            "name": "复仇",
+            "text": ["将卡牌转化为{C:attention}污渍玻璃牌{}。"],
+            "unlock": [],
+            "source": {
+                "name": "Vengeance",
+                "text": ["Enhances selected card into a {C:attention}Stained Glass Card{}."],
+                "unlock": [],
+            },
+            "review": {
+                "term_violations": [],
+                "consistency_warnings": [],
+                "naturalness_warnings": [],
+                "meaning_warnings": [],
+                "rewrite_hint": "",
+                "retry_history": [],
+            },
+            "needs_review": False,
+        },
+    ]
+
+    _apply_preview_consistency(rows)
+
+    assert rows[1]["text"] == ["将卡牌转化为{C:attention}彩色玻璃牌{}。"]
+    assert rows[1]["needs_review"] is False
+    assert rows[1]["review"]["consistency_warnings"] == []
+
+
+def test_entry_style_examples_prefers_tm_custom_category_before_official_fallback(
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "tm.db"
+    migrate(db_path)
+    with __import__("sqlite3").connect(db_path) as db:
+        db.execute(
+            """
+            insert into tm_entries(
+                mod_id, unit_key, context_type, source_text, target_text,
+                normalized_source, token_signature, quality, qdrant_point_id,
+                source_hash, target_hash
+            ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "translated_sleeves",
+                "descriptions.Sleeve.sleeve_demo.text[0]",
+                "sleeve_description_line",
+                "{C:blue}+1{} hand every round",
+                "每回合出牌次数{C:blue}+1{}",
+                "hand every round",
+                "",
+                "imported_human",
+                "point-style",
+                "source-style",
+                "target-style",
+            ),
+        )
+        db.commit()
+    style_pack = StylePack(
+        source_mod_id="balatro_origin",
+        source_locale_path="en-us.lua",
+        target_locale_path="zh_CN.lua",
+        categories={
+            "back": StyleCategory(
+                category="back",
+                available_count=1,
+                minimum_required=1,
+                examples=[
+                    StyleExample(
+                        category="back",
+                        context_type="back_description_line",
+                        unit_key="descriptions.Back.b_blue.text[0]",
+                        source="{C:blue}+#1#{} hand",
+                        target="每回合",
+                    )
+                ],
+            )
+        },
+    )
+
+    rendered = _entry_style_examples(
+        style_pack=style_pack,
+        db_path=db_path,
+        entry_key="descriptions.Sleeve.sleeve_new",
+        query_text="{C:blue}+1{} hand every round",
+        limit=2,
+    )
+
+    assert "translated_sleeves:descriptions.Sleeve.sleeve_demo.text[0]" in rendered
+    assert "每回合出牌次数{C:blue}+1{}" in rendered
+    assert "descriptions.Back.b_blue.text[0]" in rendered
 
 
 def test_rag_preview_mod_prints_references(monkeypatch, tmp_path) -> None:
@@ -212,6 +389,7 @@ def test_translate_entry_preview_mod_runs_llm_calls_concurrently_in_source_order
             unlock_text,
             references,
             max_width,
+            style_examples="",
         ):
             nonlocal active, max_active
             with lock:
@@ -270,6 +448,482 @@ def test_translate_entry_preview_mod_runs_llm_calls_concurrently_in_source_order
     assert all(row["ok"] is True for row in rows)
 
 
+def test_translate_entry_preview_mod_logs_parallel_failure_summary(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Joker.j_bad.text[0]", "bad token"),
+                FakeUnit("descriptions.Joker.j_fail.text[0]", "boom"),
+            ]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate_entry(self, *, body_text, **kwargs):
+            if body_text == "boom":
+                raise RuntimeError("upstream timeout")
+
+            class Result:
+                name = None
+                text = []
+                unlock = []
+                token_errors = ["text: Token count mismatch"]
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr(
+        "app.cli.main._entry_style_examples",
+        lambda **kwargs: (
+            "Balatro Simplified Chinese style references:\n"
+            "- balatro_origin:descriptions.Joker.j_ref.text\n"
+            "  EN: ref\n"
+            "  ZH: 参考"
+        ),
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "2",
+            "--concurrency",
+            "2",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "LLM queued [1/2] descriptions.Joker.j_bad" in result.output
+    assert "style_refs=1" in result.output
+    assert "LLM failed [2/2] descriptions.Joker.j_fail: upstream timeout" in result.output
+    assert "Preview summary: ok=0 failed=1 token_error_entries=1 needs_review=2" in result.output
+
+
+def test_translate_entry_preview_mod_accumulates_related_group_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+    translated_order: list[str] = []
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Familiar_Tarots.c_fam_vengeance.name", "Vengeance"),
+                FakeUnit(
+                    "descriptions.Familiar_Tarots.c_fam_vengeance.text[0]",
+                    "Enhances selected card into a {C:attention}Stained Glass Card{}.",
+                ),
+                FakeUnit(
+                    "descriptions.Enhanced.m_fam_stained_glass.name",
+                    "Stained Glass",
+                ),
+                FakeUnit(
+                    "descriptions.Enhanced.m_fam_stained_glass.text[0]",
+                    "Gains random Edition",
+                ),
+            ]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate_entry(self, *, name_text, body_text, style_examples="", **kwargs):
+            translated_order.append(name_text)
+            if name_text == "Vengeance":
+                assert "Stained Glass -> 彩色玻璃" in style_examples
+                assert "descriptions.Enhanced.m_fam_stained_glass" in style_examples
+
+                class Result:
+                    name = "复仇"
+                    text = ["将卡牌转化为{C:attention}彩色玻璃牌{}。"]
+                    unlock = []
+                    token_errors = []
+
+                return Result()
+
+            class Result:
+                name = "彩色玻璃"
+                text = ["每次计分时获得随机版本"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr("app.cli.main._entry_style_examples", lambda **kwargs: "")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "2",
+            "--concurrency",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert translated_order == ["Stained Glass", "Vengeance"]
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert [row["entry_key"] for row in rows] == [
+        "descriptions.Familiar_Tarots.c_fam_vengeance",
+        "descriptions.Enhanced.m_fam_stained_glass",
+    ]
+    assert rows[0]["text"] == ["将卡牌转化为{C:attention}彩色玻璃牌{}。"]
+
+
+def test_translate_entry_preview_mod_sends_global_name_glossary_to_all_entries(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Enhanced.m_fam_stained_glass.name", "Stained Glass"),
+                FakeUnit("descriptions.Enhanced.m_fam_stained_glass.text[0]", "Gains Edition"),
+                FakeUnit("descriptions.Joker.j_plain.name", "Plain Joker"),
+                FakeUnit("descriptions.Joker.j_plain.text[0]", "Gives chips"),
+            ]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    class Result:
+        def __init__(self, candidate_text, token_errors=None) -> None:
+            self.candidate_text = candidate_text
+            self.token_errors = token_errors or []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate(self, *, source_text, **kwargs):
+            translations = {
+                "Stained Glass": "彩色玻璃",
+                "Plain Joker": "普通小丑",
+            }
+            return Result(translations[source_text])
+
+        def translate_entry(self, *, name_text, body_text, style_examples="", **kwargs):
+            assert "Stained Glass -> 彩色玻璃" in style_examples
+            assert "Plain Joker -> 普通小丑" in style_examples
+
+            class EntryResult:
+                name = "彩色玻璃" if name_text == "Stained Glass" else "普通小丑"
+                text = ["已翻译"]
+                unlock = []
+                token_errors = []
+
+            return EntryResult()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr("app.cli.main._entry_style_examples", lambda **kwargs: "")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "2",
+            "--concurrency",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert [row["name"] for row in rows] == ["彩色玻璃", "普通小丑"]
+
+
+def test_translate_entry_preview_mod_uses_origin_name_patterns_for_name_prepass(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Other.fam_gilded_seal_seal.name", "Gilded Seal"),
+                FakeUnit(
+                    "descriptions.Other.fam_gilded_seal_seal.text[0]",
+                    "{C:money}$5{} when played",
+                ),
+            ]
+
+    class BadRef:
+        tm_entry_id = 10
+        score = 1.0
+        mod_id = "partner_api"
+        unit_key = "descriptions.Partner.pnr_partner_gilded.name"
+        context_type = "partner_name"
+        source_text = "Gilded"
+        target_text = "黄金伙伴"
+
+    class FakeRetrieval:
+        references = [BadRef()]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class NameResult:
+        candidate_text = "镀金蜡封"
+        token_errors = []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate(self, *, source_text, references):
+            assert source_text == "Gilded Seal"
+            pairs = {(ref.source_text, ref.target_text) for ref in references}
+            assert ("Seal", "蜡封") in pairs
+            assert ("Gold Seal", "金色蜡封") in pairs
+            assert ("Gilded", "黄金伙伴") not in pairs
+            return NameResult()
+
+        def translate_entry(self, **kwargs):
+            class Result:
+                name = "黄金伙伴封印"
+                text = ["打出时获得{C:money}$5{}"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr("app.cli.main._entry_style_examples", lambda **kwargs: "")
+    monkeypatch.setattr(
+        "app.cli.main.build_locked_term_map",
+        lambda db_path, mod_id=None: {
+            "Blue Seal": "蓝色蜡封",
+            "Gold Seal": "金色蜡封",
+            "Purple Seal": "紫色蜡封",
+            "Red Seal": "红色蜡封",
+        },
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "1",
+            "--concurrency",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["name"] == "镀金蜡封"
+
+
+def test_translate_entry_preview_mod_uses_name_prepass_for_label_only_entries(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [FakeUnit("misc.labels.fam_familiar_seal_seal", "Familiar Seal")]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    class NameResult:
+        candidate_text = "使魔蜡封"
+        token_errors = []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate(self, *, source_text, references):
+            assert source_text == "Familiar Seal"
+            return NameResult()
+
+        def translate_entry(self, **kwargs):
+            raise AssertionError("label-only entries should not call translate_entry")
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr("app.cli.main._entry_style_examples", lambda **kwargs: "")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "1",
+            "--concurrency",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["ok"] is True
+    assert row["patchable"] is True
+    assert row["name"] == "使魔蜡封"
+    assert row["text"] == []
+    assert row["token_errors"] == []
+
+
 def test_translate_entry_preview_mod_writes_grouped_jsonl(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("LLM_CONCURRENCY", raising=False)
     source = tmp_path / "localization" / "default.lua"
@@ -322,12 +976,14 @@ def test_translate_entry_preview_mod_writes_grouped_jsonl(monkeypatch, tmp_path)
             unlock_text,
             references,
             max_width,
+            style_examples,
         ):
             assert name_text == "Test Joker"
             assert body_text == "Gain +#1# Mult at end of round"
             assert unlock_text == "Find this Joker"
             assert references[0].target_text == "获得 +#1# 倍率"
             assert max_width == 18
+            assert style_examples == "Official examples for joker"
 
             class Result:
                 name = "测试小丑"
@@ -342,6 +998,22 @@ def test_translate_entry_preview_mod_writes_grouped_jsonl(monkeypatch, tmp_path)
     monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
     monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
     monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr("app.cli.main.load_style_pack", lambda path=None: object())
+    class FakeStyleExample:
+        unit_key = "style.key"
+        source_mod_id = ""
+
+    monkeypatch.setattr(
+        "app.cli.main.select_style_examples",
+        lambda pack, *, entry_key, query_text, limit, allow_fallback=True: [
+            FakeStyleExample()
+        ],
+    )
+    monkeypatch.setattr("app.cli.main.select_tm_style_examples", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        "app.cli.main.render_style_examples",
+        lambda examples: "Official examples for joker",
+    )
     seen_queries = []
 
     def fake_retrieve_references(**kwargs):
@@ -350,6 +1022,7 @@ def test_translate_entry_preview_mod_writes_grouped_jsonl(monkeypatch, tmp_path)
         return FakeRetrieval()
 
     monkeypatch.setattr("app.cli.main.retrieve_references", fake_retrieve_references)
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
 
     result = CliRunner().invoke(
         app,
@@ -447,6 +1120,7 @@ def test_translate_entry_preview_mod_preserves_credit_lines_without_llm(
             unlock_text,
             references,
             max_width,
+            style_examples="",
         ):
             assert body_text == "{C:attention}+2{} hand size"
 
@@ -562,9 +1236,16 @@ def test_translate_entry_preview_mod_injects_glossary_references(
     monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
     monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
     monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+
+    glossary_queries = []
+
+    def fake_retrieve_glossary_references(**kwargs):
+        glossary_queries.append(kwargs["query_text"])
+        return [GlossaryRef()]
+
     monkeypatch.setattr(
         "app.cli.main.retrieve_glossary_references",
-        lambda **kwargs: [GlossaryRef()],
+        fake_retrieve_glossary_references,
     )
     monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
     monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
@@ -587,9 +1268,440 @@ def test_translate_entry_preview_mod_injects_glossary_references(
     assert result.exit_code == 0
     rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["rag_refs"][0]["target"] == "负片"
+    assert glossary_queries == ["Perkeo Creates a {C:dark_edition}Negative{} copy"]
 
 
-def test_translate_entry_preview_marks_line_count_mismatch_unpatchable(
+def test_translate_entry_preview_retries_after_quality_review(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            assert path == source
+            return [
+                FakeUnit("descriptions.Edition.e_test.name", "Nitro"),
+                FakeUnit(
+                    "descriptions.Edition.e_test.text[0]",
+                    "{C:attention}+2{} hand size when {C:attention}played{}",
+                ),
+                FakeUnit(
+                    "descriptions.Edition.e_test.text[1]",
+                    "{C:attention}Resets{} at end of round{}",
+                ),
+            ]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    class QualityReview:
+        def __init__(self, needs_revision, naturalness_warnings, rewrite_hint) -> None:
+            self.needs_revision = needs_revision
+            self.naturalness_warnings = naturalness_warnings
+            self.meaning_warnings = []
+            self.rewrite_hint = rewrite_hint
+
+        def to_dict(self):
+            return {
+                "needs_revision": self.needs_revision,
+                "naturalness_warnings": self.naturalness_warnings,
+                "meaning_warnings": self.meaning_warnings,
+                "rewrite_hint": self.rewrite_hint,
+            }
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate_entry(self, **kwargs):
+            class Result:
+                name = "Nitro"
+                text = [
+                    "{C:attention}+2{}手牌上限，当{C:attention}打出{}时，"
+                    "{C:attention}重置{}，在回合结束时{}"
+                ]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+        def review_entry_translation(self, *, text, **kwargs):
+            if "当" in "".join(text):
+                return QualityReview(
+                    True,
+                    ["语序生硬，保留英文 when/resets 结构"],
+                    "改为：打出时 +2 手牌上限，回合结束时重置。",
+                )
+            return QualityReview(False, [], "")
+
+        def revise_entry_translation(self, *, review_feedback, **kwargs):
+            assert "打出时 +2 手牌上限" in review_feedback
+
+            class Result:
+                name = "Nitro"
+                text = [
+                    "{C:attention}打出{}时{C:attention}+2{}手牌上限，"
+                    "回合结束时{C:attention}重置{}"
+                ]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    row = rows[0]
+    assert row["text"] == [
+        "{C:attention}打出{}时{C:attention}+2{}手牌上限，"
+        "回合结束时{C:attention}重置{}"
+    ]
+    assert row["needs_review"] is False
+    assert row["review"]["naturalness_warnings"] == []
+    assert row["review"]["retry_history"][0]["reason"] == "quality_review"
+    assert "语序生硬" in row["review"]["retry_history"][0]["naturalness_warnings"][0]
+
+
+def test_translate_entry_preview_keeps_original_when_quality_retry_breaks_tokens(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Back.b_test.name", "Test Deck"),
+                FakeUnit(
+                    "descriptions.Back.b_test.text[0]",
+                    "{C:blue}+1{} hand every round",
+                ),
+            ]
+
+    class QualityReview:
+        needs_revision = True
+        naturalness_warnings = ["语序需要调整"]
+        meaning_warnings = []
+        rewrite_hint = "每回合出牌次数+1"
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate_entry(self, **kwargs):
+            class Result:
+                name = "测试牌组"
+                text = ["每回合出牌次数{C:blue}+1{}"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+        def review_entry_translation(self, **kwargs):
+            return QualityReview()
+
+        def revise_entry_translation(self, **kwargs):
+            class Result:
+                name = "测试牌组"
+                text = []
+                unlock = []
+                token_errors = ["text: Token count mismatch"]
+
+            return Result()
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["ok"] is True
+    assert row["token_errors"] == []
+    assert row["text"] == ["每回合出牌次数{C:blue}+1{}"]
+    assert row["needs_review"] is True
+    assert row["review"]["naturalness_warnings"] == ["语序需要调整"]
+    assert row["review"]["retry_history"][0]["retry_token_errors"] == [
+        "text: Token count mismatch"
+    ]
+
+
+def test_translate_entry_preview_marks_token_errors_as_needs_review(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Back.b_test.name", "Test Deck"),
+                FakeUnit("descriptions.Back.b_test.text[0]", "{C:blue}+1{} hand"),
+            ]
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate_entry(self, **kwargs):
+            class Result:
+                name = "测试牌组"
+                text = []
+                unlock = []
+                token_errors = ["text: Token count mismatch"]
+
+            return Result()
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["ok"] is False
+    assert row["needs_review"] is True
+    assert row["token_errors"] == ["text: Token count mismatch"]
+
+
+def test_translate_entry_preview_mod_emits_review_tiers_and_brief_version(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Joker.j_perkeo.name", "Perkeo"),
+                FakeUnit(
+                    "descriptions.Joker.j_perkeo.text[0]",
+                    "Creates a {C:dark_edition}Negative{} copy",
+                ),
+            ]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class DenseRef:
+        tm_entry_id = 200
+        context_type = "joker_description_line"
+        score = 0.77
+        mod_id = "memory_mod"
+        unit_key = "memory.key"
+        source_text = "random consumable"
+        target_text = "随机消耗牌"
+
+    class GlossaryRef:
+        tm_entry_id = 100
+        context_type = "edition_name"
+        score = 1.0
+        mod_id = "balatro_origin"
+        unit_key = "descriptions.Edition.e_negative.name"
+        source_text = "Negative"
+        target_text = "负片"
+
+    class FakeRetrieval:
+        references = [DenseRef()]
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate_entry(self, *, references, **kwargs):
+            # tiers propagate into the references handed to the translator
+            tiers = {r.source_text: r.tier for r in references}
+            assert tiers["Negative"] == "locked"
+            assert tiers["random consumable"] == "same_context"
+
+            class Result:
+                name = "Perkeo"
+                # deliberate violation: Negative translated as 负面, not 负片
+                text = ["创建{C:dark_edition}负面{}复制"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr(
+        "app.cli.main.retrieve_glossary_references",
+        lambda **kwargs: [GlossaryRef()],
+    )
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr(
+        "app.cli.main.build_locked_term_map",
+        lambda db_path, mod_id=None: {"Negative": "负片"},
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    row = rows[0]
+
+    # tiered rag_refs
+    assert row["rag_refs"][0]["tier"] == "locked"
+    assert row["rag_refs"][0]["context_type"] == "edition_name"
+    assert row["rag_refs"][1]["tier"] == "same_context"
+
+    # review fields
+    assert row["needs_review"] is True
+    assert row["brief_version"].startswith("sha256:")
+    violations = row["review"]["term_violations"]
+    assert len(violations) == 1
+    assert violations[0]["term"] == "Negative"
+    assert violations[0]["expected"] == "负片"
+    assert violations[0]["kind"] == "styled"
+    # placeholder review sub-fields present for later phases
+    assert row["review"]["naturalness_warnings"] == []
+    assert row["review"]["meaning_warnings"] == []
+
+
+def test_translate_entry_preview_marks_line_count_mismatch_as_table_apply_mode(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -660,8 +1772,253 @@ def test_translate_entry_preview_marks_line_count_mismatch_unpatchable(
     assert result.exit_code == 0
     rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
     assert rows[0]["ok"] is True
+    assert rows[0]["needs_review"] is False
     assert rows[0]["patchable"] is False
+    assert rows[0]["apply_mode"] == "table"
+    assert rows[0]["apply_warnings"] == [
+        "text line count mismatch: source=1, target=2"
+    ]
     assert rows[0]["patch_warnings"] == ["text line count mismatch: source=1, target=2"]
+
+
+def test_apply_entry_preview_writes_only_safe_patchable_rows(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text(
+        """return {
+    descriptions={
+        Joker={
+            j_safe={name="Safe Joker", text={"Gain +#1# Mult"}},
+            j_review={name="Review Joker", text={"Needs review"}},
+            j_unpatchable={name="Long Joker", text={"One line"}},
+        },
+    },
+}
+""",
+        encoding="utf-8",
+    )
+    preview = tmp_path / "preview.jsonl"
+    rows = [
+        {
+            "entry_key": "descriptions.Joker.j_safe",
+            "ok": True,
+            "patchable": True,
+            "needs_review": False,
+            "target_units": {
+                "name": "descriptions.Joker.j_safe.name",
+                "text": ["descriptions.Joker.j_safe.text[0]"],
+                "unlock": [],
+            },
+            "name": "安全小丑",
+            "text": ["获得 +#1# 倍率"],
+            "unlock": [],
+        },
+        {
+            "entry_key": "descriptions.Joker.j_review",
+            "ok": True,
+            "patchable": True,
+            "needs_review": True,
+            "target_units": {
+                "name": "descriptions.Joker.j_review.name",
+                "text": ["descriptions.Joker.j_review.text[0]"],
+                "unlock": [],
+            },
+            "name": "待审小丑",
+            "text": ["需要复审"],
+            "unlock": [],
+        },
+        {
+            "entry_key": "descriptions.Joker.j_unpatchable",
+            "ok": True,
+            "patchable": False,
+            "needs_review": False,
+            "target_units": {
+                "name": "descriptions.Joker.j_unpatchable.name",
+                "text": ["descriptions.Joker.j_unpatchable.text[0]"],
+                "unlock": [],
+            },
+            "name": "长小丑",
+            "text": ["第一行", "第二行"],
+            "unlock": [],
+        },
+    ]
+    preview.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "localization" / "zh_CN.lua"
+    monkeypatch.setattr("app.cli.main.validate_file", lambda path: (True, ""))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "apply-entry-preview",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--input",
+            str(preview),
+            "--output",
+            "localization/zh_CN.lua",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    patched = output.read_text(encoding="utf-8")
+    assert "安全小丑" in patched
+    assert "获得 +#1# 倍率" in patched
+    assert "Review Joker" in patched
+    assert "待审小丑" not in patched
+    assert "Long Joker" in patched
+    assert "长小丑" not in patched
+    assert "applied_entries=1" in result.output
+    assert "skipped_needs_review=1" in result.output
+    assert "skipped_requires_table_level=1" in result.output
+    assert "skipped_blocked=0" in result.output
+
+
+def test_apply_entry_preview_keeps_existing_output_when_lua_validation_fails(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text(
+        """return {
+    descriptions={Joker={j_test={name="Test Joker", text={"Hello"}}}},
+}
+""",
+        encoding="utf-8",
+    )
+    preview = tmp_path / "preview.jsonl"
+    preview.write_text(
+        json.dumps(
+            {
+                "entry_key": "descriptions.Joker.j_test",
+                "ok": True,
+                "patchable": True,
+                "needs_review": False,
+                "target_units": {
+                    "name": "descriptions.Joker.j_test.name",
+                    "text": ["descriptions.Joker.j_test.text[0]"],
+                    "unlock": [],
+                },
+                "name": "测试小丑",
+                "text": ["你好"],
+                "unlock": [],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "localization" / "zh_CN.lua"
+    output.write_text("keep me", encoding="utf-8")
+    monkeypatch.setattr("app.cli.main.validate_file", lambda path: (False, "bad lua"))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "apply-entry-preview",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--input",
+            str(preview),
+            "--output",
+            "localization/zh_CN.lua",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Lua validation failed: bad lua" in result.output
+    assert output.read_text(encoding="utf-8") == "keep me"
+    assert not output.with_name(output.name + ".tmp").exists()
+
+
+def test_apply_entry_preview_table_level_applies_line_count_changes(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text(
+        """return {
+    descriptions={
+        Joker={
+            j_long={
+                name="Long Joker",
+                text={"One line"},
+                unlock={"Find it"},
+            },
+        },
+    },
+}
+""",
+        encoding="utf-8",
+    )
+    preview = tmp_path / "preview.jsonl"
+    preview.write_text(
+        json.dumps(
+            {
+                "entry_key": "descriptions.Joker.j_long",
+                "ok": True,
+                "patchable": False,
+                "apply_mode": "table",
+                "needs_review": False,
+                "patch_warnings": [
+                    "text line count mismatch: source=1, target=2",
+                    "unlock line count mismatch: source=1, target=2",
+                ],
+                "target_units": {
+                    "name": "descriptions.Joker.j_long.name",
+                    "text": ["descriptions.Joker.j_long.text[0]"],
+                    "unlock": ["descriptions.Joker.j_long.unlock[0]"],
+                },
+                "name": "长小丑",
+                "text": ["第一行", "第二行"],
+                "unlock": ["找到它", "再打出它"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "localization" / "zh_CN.lua"
+    monkeypatch.setattr("app.cli.main.validate_file", lambda path: (True, ""))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "apply-entry-preview",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--input",
+            str(preview),
+            "--output",
+            "localization/zh_CN.lua",
+            "--table-level",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    patched = output.read_text(encoding="utf-8")
+    assert "长小丑" in patched
+    assert '"第一行"' in patched
+    assert '"第二行"' in patched
+    assert '"找到它"' in patched
+    assert '"再打出它"' in patched
+    assert "applied_entries=1" in result.output
+    assert "applied_table=1" in result.output
+    assert "skipped_requires_table_level=0" in result.output
+    assert "skipped_blocked=0" in result.output
 
 
 def test_llm_config_prefers_environment(monkeypatch) -> None:

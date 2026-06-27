@@ -9,6 +9,7 @@ dependencies = [
     "fastapi",
     "gitpython",
     "httpx",
+    "jieba>=0.42.1",
     "orjson",
     "pydantic",
     "pydantic-settings",

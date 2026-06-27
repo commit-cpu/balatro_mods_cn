@@ -1,8 +1,8 @@
 from app.lua.reflow import reflow_zh_text, visual_width
 
 
-def test_visual_width_ignores_style_tokens_but_counts_variables() -> None:
-    assert visual_width("{C:mult}倍率{}+#1#") == 8
+def test_visual_width_ignores_style_tokens_and_counts_variables_as_one() -> None:
+    assert visual_width("{C:mult}倍率{}+#1#") == 6
 
 
 def test_reflow_zh_text_does_not_split_tokens() -> None:
@@ -36,3 +36,32 @@ def test_reflow_zh_text_does_not_split_ascii_words() -> None:
     assert not any(line.startswith(("eaty", "aty", "ty", "y ")) for line in lines)
     assert not any(line.endswith(("St", "Sta", "Stak")) for line in lines)
     assert not any(line.startswith(("ake", "ke")) for line in lines)
+
+
+def test_reflow_zh_text_does_not_split_common_balatro_terms() -> None:
+    lines = reflow_zh_text(
+        "将 {C:attention}#1#{} 张选定的卡牌增强为 {C:attention}污渍玻璃牌{}，当前为{C:money}$#2#{}",
+        max_width=18,
+    )
+
+    assert "".join(lines) == (
+        "将 {C:attention}#1#{} 张选定的卡牌增强为 {C:attention}污渍玻璃牌{}，当前为{C:money}$#2#{}"
+    )
+    joined_for_review = " ".join(lines)
+    assert "卡 牌" not in joined_for_review
+    assert "污渍玻璃 牌" not in joined_for_review
+    assert "当 前" not in joined_for_review
+
+
+def test_reflow_zh_text_keeps_styled_spans_and_parentheses_together() -> None:
+    lines = reflow_zh_text(
+        "重新触发{C:attention}每张{}打出的点数为{C:attention}无点数{}的牌"
+        "{C:inactive}（如果你有一手完美的牌）{}",
+        max_width=18,
+    )
+
+    joined_for_review = " ".join(lines)
+    assert any("{C:attention}无点数{}" in line for line in lines)
+    assert "{C:inactive}（如果你有一手完美的牌）{}" in lines
+    assert "{C:attention}无 点数{}" not in joined_for_review
+    assert "（如果 你有一手完美的牌）" not in joined_for_review

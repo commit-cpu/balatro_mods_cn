@@ -114,6 +114,90 @@ class TestExtractBytes:
         assert len(units) == 0
 
 
+MISC_LUA = b"""return {
+    descriptions={
+        Joker={
+            j_test={
+                name="Test",
+                text={"Line one"},
+            },
+        },
+    },
+    misc={
+        dictionary={
+            ["$"]="$",
+            b_FAQ="FAQ",
+        },
+        labels={
+            fn_Mythic="Mythic",
+        },
+        quips={
+            dq_1={
+                "Yikes!",
+                "Good luck!",
+            },
+        },
+    },
+}
+"""
+
+
+class TestExtractMisc:
+    def test_extracts_dictionary_scalars(self, extractor: LuaExtractor) -> None:
+        units = {
+            u.unit_key: u for u in extractor.extract_bytes(MISC_LUA)
+            if u.unit_key.startswith("misc.dictionary.")
+        }
+        assert set(units) == {"misc.dictionary.$", "misc.dictionary.b_FAQ"}
+        assert units["misc.dictionary.b_FAQ"].source_text == "FAQ"
+        assert units["misc.dictionary.b_FAQ"].context_type == "misc_dictionary"
+        # bracket-string key "$" decodes to a bare $ key
+        assert units["misc.dictionary.$"].source_text == "$"
+
+    def test_extracts_labels(self, extractor: LuaExtractor) -> None:
+        units = {
+            u.unit_key: u for u in extractor.extract_bytes(MISC_LUA)
+            if u.unit_key.startswith("misc.labels.")
+        }
+        assert set(units) == {"misc.labels.fn_Mythic"}
+        assert units["misc.labels.fn_Mythic"].source_text == "Mythic"
+        assert units["misc.labels.fn_Mythic"].context_type == "misc_label"
+
+    def test_extracts_quips_array(self, extractor: LuaExtractor) -> None:
+        units = {
+            u.unit_key: u for u in extractor.extract_bytes(MISC_LUA)
+            if u.unit_key.startswith("misc.quips.")
+        }
+        assert set(units) == {"misc.quips.dq_1[0]", "misc.quips.dq_1[1]"}
+        assert units["misc.quips.dq_1[0]"].source_text == "Yikes!"
+        assert units["misc.quips.dq_1[1]"].source_text == "Good luck!"
+        assert units["misc.quips.dq_1[0]"].context_type == "quip_line"
+
+    def test_misc_byte_spans_are_correct(self, extractor: LuaExtractor) -> None:
+        units = [u for u in extractor.extract_bytes(MISC_LUA) if u.unit_key.startswith("misc.")]
+        assert units  # sanity
+        for u in units:
+            actual = MISC_LUA[u.byte_start : u.byte_end].decode("utf-8")
+            assert actual == u.source_text, (
+                f"Byte span mismatch for {u.unit_key}: "
+                f"expected {u.source_text!r}, got {actual!r}"
+            )
+
+    def test_misc_units_have_tokens(self, extractor: LuaExtractor) -> None:
+        source = b'return { misc={ labels={ fn_x="{C:attention}X{}" } } }'
+        units = [u for u in extractor.extract_bytes(source) if u.unit_key.startswith("misc.")]
+        assert len(units) == 1
+        assert [t.raw for t in units[0].tokens] == ["{C:attention}", "{}"]
+
+    def test_descriptions_still_extracted_alongside_misc(
+        self, extractor: LuaExtractor
+    ) -> None:
+        units = extractor.extract_bytes(MISC_LUA)
+        keys = {u.unit_key for u in units}
+        assert "descriptions.Joker.j_test.name" in keys
+        assert "descriptions.Joker.j_test.text[0]" in keys
+
+
 class TestExtractFile:
     def test_extracts_from_file(self, extractor: LuaExtractor, minimal_file: Path) -> None:
         units = extractor.extract_file(minimal_file)
@@ -150,8 +234,14 @@ class TestRealFiles:
             assert u.byte_start <= u.byte_end
 
     def test_context_types_are_valid(self, origin_en: list[TranslationUnit]) -> None:
-        valid_types = {"_name", "_description_line", "unlock_condition"}
+        valid_suffixes = {"_name", "_description_line"}
+        valid_exact = {
+            "unlock_condition",
+            "misc_dictionary",
+            "misc_label",
+            "quip_line",
+        }
         for u in origin_en:
-            assert any(u.context_type.endswith(suffix) for suffix in valid_types), (
-                f"Unexpected context_type: {u.context_type}"
-            )
+            assert any(u.context_type.endswith(s) for s in valid_suffixes) or (
+                u.context_type in valid_exact
+            ), f"Unexpected context_type: {u.context_type}"

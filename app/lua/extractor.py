@@ -14,7 +14,6 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 import tree_sitter_lua as tslua
 from tree_sitter import Language, Parser
@@ -106,14 +105,21 @@ class LuaExtractor:
 
         # Walk descriptions.{Category}.{key}.{name|text|unlock}
         descriptions = _find_field(source, outer_table, "descriptions")
-        if descriptions is None:
-            return units
+        if descriptions is not None:
+            desc_table = _first_child_of_type(descriptions, "table_constructor")
+            if desc_table is not None:
+                _extract_description_units(source, desc_table, units)
 
-        desc_table = _first_child_of_type(descriptions, "table_constructor")
-        if desc_table is None:
-            return units
+        # Walk misc.{dictionary,labels,quips} – UI strings, labels and quips
+        # that descriptions-only extraction would otherwise miss.
+        _extract_misc_units(source, outer_table, units)
 
-        for category_field in _iter_fields(desc_table):
+        return units
+
+
+def _extract_description_units(source: bytes, desc_table, units: list[TranslationUnit]) -> None:
+    """Append translation units for ``descriptions.<Category>.<entry>.{name|text|unlock}``."""
+    for category_field in _iter_fields(desc_table):
             category_name = _field_name(source, category_field)
             category_table = _first_child_of_type(category_field, "table_constructor")
             if category_table is None:
@@ -182,7 +188,71 @@ class LuaExtractor:
                                 )
                             )
 
-        return units
+
+def _extract_misc_units(source: bytes, outer_table, units: list[TranslationUnit]) -> None:
+    """Append translation units for ``misc.dictionary`` / ``misc.labels`` /
+    ``misc.quips``.
+
+    ``dictionary`` and ``labels`` are flat ``key = "string"`` tables; ``quips``
+    is ``key = { "line", ... }``. Keys may be bracket strings (``["$"]``).
+    """
+    misc_field = _find_field(source, outer_table, "misc")
+    if misc_field is None:
+        return
+    misc_table = _first_child_of_type(misc_field, "table_constructor")
+    if misc_table is None:
+        return
+
+    sections: list[tuple[str, str]] = [
+        ("dictionary", "misc_dictionary"),
+        ("labels", "misc_label"),
+        ("quips", "quip_line"),
+    ]
+    for section_name, context_type in sections:
+        section_field = _find_field(source, misc_table, section_name)
+        if section_field is None:
+            continue
+        section_table = _first_child_of_type(section_field, "table_constructor")
+        if section_table is None:
+            continue
+
+        for entry_field in _iter_fields(section_table):
+            key = _field_key(source, entry_field)
+            if not key:
+                continue
+            value = entry_field.child_by_field_name("value")
+            if value is None:
+                continue
+
+            if section_name == "quips":
+                if value.type != "table_constructor":
+                    continue
+                for idx, str_node in enumerate(_iter_array_strings(value)):
+                    text, start, end = _string_content(source, str_node)
+                    units.append(
+                        TranslationUnit(
+                            unit_key=f"misc.quips.{key}[{idx}]",
+                            source_text=text,
+                            byte_start=start,
+                            byte_end=end,
+                            context_type=context_type,
+                            tokens=extract_tokens(text),
+                        )
+                    )
+            else:
+                if value.type != "string":
+                    continue
+                text, start, end = _string_content(source, value)
+                units.append(
+                    TranslationUnit(
+                        unit_key=f"misc.{section_name}.{key}",
+                        source_text=text,
+                        byte_start=start,
+                        byte_end=end,
+                        context_type=context_type,
+                        tokens=extract_tokens(text),
+                    )
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -218,6 +288,22 @@ def _field_name(source: bytes, field_node) -> str:
     return _node_text(source, name)
 
 
+def _field_key(source: bytes, field_node) -> str:
+    """Return the logical key of a ``field`` node, handling bracket-string keys.
+
+    Unlike :func:`_field_name`, this decodes ``["key"]`` style keys (used by
+    e.g. ``misc.dictionary["$"]``) instead of returning ``"?"``.
+    Returns an empty string for keyless array elements.
+    """
+    name = field_node.child_by_field_name("name")
+    if name is None:
+        return ""
+    if name.type == "string":
+        text, _, _ = _string_content(source, name)
+        return text
+    return _node_text(source, name)
+
+
 def _node_text(source: bytes, node) -> str:
     """Decode the bytes spanned by *node*."""
     return source[node.start_byte : node.end_byte].decode("utf-8")
@@ -236,9 +322,6 @@ def _string_content(source: bytes, string_node) -> tuple[str, int, int]:
     if raw.startswith('[[') or raw.startswith('=['):
         # Long bracket string
         text = _unquote_long_bracket(raw)
-        # Approximate byte offset (tree-sitter should give content child though)
-        offset = len(raw) - len(_unquote_long_bracket_end(raw)) - len(text)
-        start = string_node.start_byte + (len(raw.encode("utf-8")) - len(text.encode("utf-8")) - len(_unquote_long_bracket_end(raw).encode("utf-8")))
         # Simpler: just use the content node next time; for now approximate
         return text, string_node.start_byte + 2, string_node.end_byte - 2
     else:
