@@ -24,6 +24,7 @@ def test_cli_has_rag_commands() -> None:
     assert "search" in result.output
     assert "build-style-pack" in result.output
     assert "apply-entry-preview" in result.output
+    assert "audit-entry-output" in result.output
     assert "rag-preview-mod" in result.output
     assert "translate-preview-mod" in result.output
     assert "translate-entry-preview-mod" in result.output
@@ -2078,6 +2079,100 @@ def test_apply_entry_preview_table_level_applies_line_count_changes(
     assert "applied_table=1" in result.output
     assert "skipped_requires_table_level=0" in result.output
     assert "skipped_blocked=0" in result.output
+
+
+def test_audit_entry_output_reports_generic_post_apply_issues(tmp_path) -> None:
+    source = tmp_path / "localization" / "en-us.lua"
+    source.parent.mkdir()
+    source.write_text(
+        """return {
+    descriptions={
+        Other={
+            m_custom={name="Custom Seal", text={"Creates a card"}},
+        },
+    },
+    misc={
+        labels={m_custom="Custom Seal"},
+        v_dictionary={a_stock="+#1# Stock"},
+    },
+}
+""",
+        encoding="utf-8",
+    )
+    target = tmp_path / "localization" / "zh_CN.lua"
+    target.write_text(
+        """return {
+    descriptions={
+        Other={
+            m_custom={name="自定义蜡封", text={"Creates a card"}},
+        },
+    },
+    misc={
+        labels={m_custom="自定义封印"},
+        v_dictionary={a_stock="+#1# Stock"},
+    },
+}
+""",
+        encoding="utf-8",
+    )
+    preview = tmp_path / "preview.jsonl"
+    preview.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "entry_key": "descriptions.Other.m_custom",
+                        "ok": True,
+                        "needs_review": True,
+                        "apply_mode": "unit",
+                    }
+                ),
+                json.dumps(
+                    {
+                        "entry_key": "misc.v_dictionary.a_stock",
+                        "ok": False,
+                        "needs_review": True,
+                        "apply_mode": "blocked",
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    report = tmp_path / "audit.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "audit-entry-output",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/en-us.lua",
+            "--target",
+            "localization/zh_CN.lua",
+            "--preview",
+            str(preview),
+            "--json-output",
+            str(report),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "failed=1" in result.output
+    assert "needs_review=1" in result.output
+    assert "residual_english=2" in result.output
+    assert "untranslated=2" in result.output
+    assert "label_name_mismatches=1" in result.output
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    assert payload["summary"]["failed"] == 1
+    assert payload["summary"]["needs_review"] == 1
+    assert {
+        "entry_key": "m_custom",
+        "description_name": "自定义蜡封",
+        "label": "自定义封印",
+    } in payload["label_name_mismatches"]
 
 
 def test_llm_config_prefers_environment(monkeypatch) -> None:

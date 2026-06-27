@@ -203,15 +203,11 @@ def _extract_misc_units(source: bytes, outer_table, units: list[TranslationUnit]
     if misc_table is None:
         return
 
-    sections: list[tuple[str, str]] = [
-        ("dictionary", "misc_dictionary"),
-        ("labels", "misc_label"),
-        ("quips", "quip_line"),
-    ]
-    for section_name, context_type in sections:
-        section_field = _find_field(source, misc_table, section_name)
-        if section_field is None:
+    for section_field in _iter_fields(misc_table):
+        section_name = _field_key(source, section_field)
+        if not section_name:
             continue
+        context_type = _misc_context_type(section_name)
         section_table = _first_child_of_type(section_field, "table_constructor")
         if section_table is None:
             continue
@@ -224,18 +220,16 @@ def _extract_misc_units(source: bytes, outer_table, units: list[TranslationUnit]
             if value is None:
                 continue
 
-            if section_name == "quips":
-                if value.type != "table_constructor":
-                    continue
+            if value.type == "table_constructor":
                 for idx, str_node in enumerate(_iter_array_strings(value)):
                     text, start, end = _string_content(source, str_node)
                     units.append(
                         TranslationUnit(
-                            unit_key=f"misc.quips.{key}[{idx}]",
+                            unit_key=f"misc.{section_name}.{key}[{idx}]",
                             source_text=text,
                             byte_start=start,
                             byte_end=end,
-                            context_type=context_type,
+                            context_type="quip_line" if section_name == "quips" else context_type,
                             tokens=extract_tokens(text),
                         )
                     )
@@ -253,6 +247,14 @@ def _extract_misc_units(source: bytes, outer_table, units: list[TranslationUnit]
                         tokens=extract_tokens(text),
                     )
                 )
+
+
+def _misc_context_type(section_name: str) -> str:
+    if section_name == "labels":
+        return "misc_label"
+    if section_name == "dictionary":
+        return "misc_dictionary"
+    return f"misc_{section_name}"
 
 
 # ---------------------------------------------------------------------------

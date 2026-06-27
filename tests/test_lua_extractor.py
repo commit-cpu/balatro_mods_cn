@@ -128,6 +128,9 @@ MISC_LUA = b"""return {
             ["$"]="$",
             b_FAQ="FAQ",
         },
+        v_dictionary={
+            a_stock="+#1# Stock",
+        },
         labels={
             fn_Mythic="Mythic",
         },
@@ -162,6 +165,15 @@ class TestExtractMisc:
         assert set(units) == {"misc.labels.fn_Mythic"}
         assert units["misc.labels.fn_Mythic"].source_text == "Mythic"
         assert units["misc.labels.fn_Mythic"].context_type == "misc_label"
+
+    def test_extracts_custom_misc_scalar_sections(self, extractor: LuaExtractor) -> None:
+        units = {
+            u.unit_key: u for u in extractor.extract_bytes(MISC_LUA)
+            if u.unit_key.startswith("misc.v_dictionary.")
+        }
+        assert set(units) == {"misc.v_dictionary.a_stock"}
+        assert units["misc.v_dictionary.a_stock"].source_text == "+#1# Stock"
+        assert units["misc.v_dictionary.a_stock"].context_type == "misc_v_dictionary"
 
     def test_extracts_quips_array(self, extractor: LuaExtractor) -> None:
         units = {
@@ -244,4 +256,5 @@ class TestRealFiles:
         for u in origin_en:
             assert any(u.context_type.endswith(s) for s in valid_suffixes) or (
                 u.context_type in valid_exact
+                or u.context_type.startswith("misc_")
             ), f"Unexpected context_type: {u.context_type}"

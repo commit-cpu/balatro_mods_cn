@@ -252,6 +252,39 @@ def check_terms(
     )
 
 
+@app.command("audit-entry-output")
+def audit_entry_output(
+    repo: Path = typer.Option(..., exists=True, file_okay=False),
+    source: str = typer.Option(...),
+    target: Path = typer.Option(...),
+    preview: Path | None = typer.Option(None, exists=True, dir_okay=False),
+    json_output: Path | None = typer.Option(None, dir_okay=False),
+) -> None:
+    """Audit a generated Lua translation output after applying entry preview."""
+    source_path = repo / source
+    target_path = target if target.is_absolute() else repo / target
+    rows = _read_preview_rows(preview) if preview is not None else []
+    report = _audit_entry_output(source_path, target_path, rows)
+    if json_output is not None:
+        json_output.parent.mkdir(parents=True, exist_ok=True)
+        json_output.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    summary = report["summary"]
+    console.print(
+        "Entry output audit: "
+        + " ".join(f"{key}={value}" for key, value in summary.items())
+    )
+    _print_audit_items("Failed preview rows", report["failed_rows"], "entry_key")
+    _print_audit_items("Needs-review preview rows", report["needs_review_rows"], "entry_key")
+    _print_audit_items("Residual English", report["residual_english"], "unit_key")
+    _print_audit_items("Untranslated units", report["untranslated_units"], "unit_key")
+    _print_audit_items("Label/name mismatches", report["label_name_mismatches"], "entry_key")
+    _print_audit_items("Name inconsistencies", report["name_inconsistencies"], "source")
+
+
 @app.command("apply-entry-preview")
 def apply_entry_preview(
     repo: Path = typer.Option(..., exists=True, file_okay=False),
@@ -645,6 +678,151 @@ def _read_preview_rows(path: Path) -> list[dict[str, object]]:
             if isinstance(row, dict):
                 rows.append(row)
     return rows
+
+
+def _audit_entry_output(
+    source_path: Path,
+    target_path: Path,
+    rows: list[dict[str, object]],
+) -> dict[str, object]:
+    lua_valid, lua_error = validate_file(target_path)
+    source_units = LuaExtractor().extract_file(source_path)
+    target_units = LuaExtractor().extract_file(target_path)
+    source_by_key = {unit.unit_key: unit.source_text for unit in source_units}
+    target_by_key = {unit.unit_key: unit.source_text for unit in target_units}
+
+    failed_rows = [
+        {
+            "entry_key": str(row.get("entry_key", "?")),
+            "error": str(row.get("error") or row.get("message") or ""),
+        }
+        for row in rows
+        if not row.get("ok")
+    ]
+    needs_review_rows = [
+        {
+            "entry_key": str(row.get("entry_key", "?")),
+            "apply_mode": _row_apply_mode(row),
+        }
+        for row in rows
+        if row.get("ok") and row.get("needs_review")
+    ]
+
+    residual_english = [
+        {"unit_key": unit.unit_key, "text": unit.source_text}
+        for unit in target_units
+        if _has_residual_english(unit.source_text)
+    ]
+    untranslated_units = [
+        {"unit_key": key, "text": target_text}
+        for key, target_text in sorted(target_by_key.items())
+        if source_by_key.get(key) == target_text and _has_residual_english(target_text)
+    ]
+    label_name_mismatches = _label_name_mismatches(target_units)
+    name_inconsistencies = _name_inconsistencies(source_by_key, target_by_key)
+
+    summary = {
+        "lua_valid": int(lua_valid),
+        "preview_rows": len(rows),
+        "failed": len(failed_rows),
+        "needs_review": len(needs_review_rows),
+        "source_units": len(source_units),
+        "target_units": len(target_units),
+        "residual_english": len(residual_english),
+        "untranslated": len(untranslated_units),
+        "label_name_mismatches": len(label_name_mismatches),
+        "name_inconsistencies": len(name_inconsistencies),
+    }
+    return {
+        "summary": summary,
+        "lua_error": lua_error,
+        "failed_rows": failed_rows,
+        "needs_review_rows": needs_review_rows,
+        "residual_english": residual_english,
+        "untranslated_units": untranslated_units,
+        "label_name_mismatches": label_name_mismatches,
+        "name_inconsistencies": name_inconsistencies,
+    }
+
+
+def _has_residual_english(text: str) -> bool:
+    stripped = re.sub(r"\{[^{}]*\}", " ", text)
+    stripped = re.sub(r"#\d+#", " ", stripped)
+    stripped = re.sub(r"\bX(?=\d|\s*$)", " ", stripped)
+    return re.search(r"[A-Za-z][A-Za-z0-9_.?'-]{2,}", stripped) is not None
+
+
+def _label_name_mismatches(units: list) -> list[dict[str, str]]:
+    names: dict[str, str] = {}
+    labels: dict[str, str] = {}
+    for unit in units:
+        match = re.match(r"^descriptions\.[^.]+\.([^.]+)\.name$", unit.unit_key)
+        if match:
+            names[match.group(1)] = unit.source_text
+            continue
+        match = re.match(r"^misc\.labels\.([^.]+)$", unit.unit_key)
+        if match:
+            labels[match.group(1)] = unit.source_text
+
+    mismatches: list[dict[str, str]] = []
+    for key in sorted(set(names) & set(labels)):
+        if names[key] != labels[key]:
+            mismatches.append(
+                {
+                    "entry_key": key,
+                    "description_name": names[key],
+                    "label": labels[key],
+                }
+            )
+    return mismatches
+
+
+def _name_inconsistencies(
+    source_by_key: dict[str, str],
+    target_by_key: dict[str, str],
+) -> list[dict[str, object]]:
+    by_source: dict[str, set[str]] = {}
+    display_source: dict[str, str] = {}
+    for key, source_text in source_by_key.items():
+        if not _is_name_like_unit(key):
+            continue
+        target_text = target_by_key.get(key)
+        if target_text is None:
+            continue
+        norm = _normalize_audit_term(source_text)
+        if not norm:
+            continue
+        display_source.setdefault(norm, source_text)
+        by_source.setdefault(norm, set()).add(target_text)
+
+    result: list[dict[str, object]] = []
+    for norm, targets in sorted(by_source.items()):
+        if len(targets) > 1:
+            result.append(
+                {
+                    "source": display_source[norm],
+                    "targets": sorted(targets),
+                }
+            )
+    return result
+
+
+def _is_name_like_unit(unit_key: str) -> bool:
+    return unit_key.endswith(".name") or unit_key.startswith("misc.labels.")
+
+
+def _normalize_audit_term(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip()).casefold()
+
+
+def _print_audit_items(title: str, items: object, key_field: str) -> None:
+    if not isinstance(items, list) or not items:
+        return
+    preview_items = []
+    for item in items[:10]:
+        if isinstance(item, dict):
+            preview_items.append(str(item.get(key_field, "?")))
+    console.print(f"{title}: {len(items)} ({', '.join(preview_items)})")
 
 
 def _diff_matches_patch_instructions(

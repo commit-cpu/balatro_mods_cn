@@ -330,6 +330,7 @@ LLM 返回完整未换行中文字符串，程序负责换行。
 3. 如果 `apply_mode=table`，可以加 `--table-level` 写回整段数组；行数变化本身不是质量问题。
 4. `needs_review=true` 的条目先人工或再次翻译处理；除非明确接受风险，不加 `--include-needs-review`。
 5. `apply-entry-preview` 会先写临时文件并验证 Lua，再替换输出文件；不会覆盖 source 路径。
+6. 写回后对任意 mod 运行 `audit-entry-output`，检查 Lua 语法、preview 跳过项、英文残留、未翻译项、同 key 的 description name / misc label 不一致、以及相同英文 name/label 多译；这个审查不依赖具体 mod 的硬编码词。
 
 当前行为：
 
@@ -359,6 +360,7 @@ uv run --frozen python -m app.cli.main translate-preview-mod --repo ... --source
 uv run --frozen python -m app.cli.main translate-entry-preview-mod --repo ... --source ... --output ...
 uv run --frozen python -m app.cli.main apply-entry-preview --repo ... --source ... --input ... --output localization/zh_CN.lua
 uv run --frozen python -m app.cli.main apply-entry-preview --repo ... --source ... --input ... --output localization/zh_CN.lua --table-level
+uv run --frozen python -m app.cli.main audit-entry-output --repo ... --source ... --target localization/zh_CN.lua --preview data/artifacts/..._entry_translate_preview.jsonl --json-output data/artifacts/..._entry_translate_audit.json
 ```
 
 术语与质量（Phase 1）：
@@ -409,21 +411,21 @@ uv run --frozen pytest -q
 - mod-wide name prepass 和全局 name glossary 注入。
 - 原版名称模式推断，例如 `Seal -> 蜡封`。
 - label-only 条目走 name prepass，避免空 body token error。
+- misc extractor 覆盖任意 `misc.<section>` 标量字符串和数组字符串，不只覆盖 `dictionary` / `labels` / `quips`。
 - reflow 中 `{...}` 样式 token 宽度为 0，`#1#` / `#2#` 变量宽度为 1。
-- Phase 1 质量基础：misc extractor 覆盖、`scan-mod-terms` 候选表、`check-terms` 术语审查、entry preview 的 `needs_review`/`review`/`brief_version`、RAG 参考分层、官方风格 examples、一次 LLM reviewer 自动重译。
+- Phase 1 质量基础：misc extractor 覆盖、`scan-mod-terms` 候选表、`check-terms` 术语审查、`audit-entry-output` 写回后审查、entry preview 的 `needs_review`/`review`/`brief_version`、RAG 参考分层、官方风格 examples、一次 LLM reviewer 自动重译。
 
 ## 下一步
 
 建议按这个顺序推进：
 
-1. 写回后校验
-   - 对生成的 `zh_CN.lua` 重新 extract。
-   - 检查源/目标 key 覆盖、token inventory、未翻译英文残留和 Lua 语法。
-   - 输出可审查 summary。
-
-2. 模组级 brief 持久化
+1. 模组级 brief 持久化
    - 将 name prepass、人工确认译名和 reviewer 建议合并为 frozen mod brief。
    - 支持下一批翻译复用，避免每次重新猜译名。
+
+2. 问题 entry 重跑
+   - 从 `audit-entry-output` 的 failed / needs_review / residual English / untranslated 输出中生成重跑清单。
+   - 重跑时带上已通过 rows 的 mod-local glossary 和 label/name 对照。
 
 3. 完整质量评审
    - 当前 entry preview 已有一次 naturalness/meaning reviewer 自动重译。

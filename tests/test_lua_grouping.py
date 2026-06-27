@@ -41,6 +41,7 @@ def test_group_translation_units_includes_misc_scalars_and_quips() -> None:
         [
             _unit("misc.labels.fam_aureate", "Aureate"),
             _unit("misc.dictionary.k_fam_plus_planet", "+1 Planet"),
+            _unit("misc.v_dictionary.a_stock", "+#1# Stock"),
             _unit("misc.quips.dq_1[0]", "Yikes!"),
             _unit("misc.quips.dq_1[1]", "Good luck!"),
         ]
@@ -49,6 +50,7 @@ def test_group_translation_units_includes_misc_scalars_and_quips() -> None:
     by_key = {group.entry_key: group for group in groups}
     assert by_key["misc.labels.fam_aureate"].name.source_text == "Aureate"
     assert by_key["misc.dictionary.k_fam_plus_planet"].name.source_text == "+1 Planet"
+    assert by_key["misc.v_dictionary.a_stock"].name.source_text == "+#1# Stock"
     assert [unit.source_text for unit in by_key["misc.quips.dq_1"].text] == [
         "Yikes!",
         "Good luck!",

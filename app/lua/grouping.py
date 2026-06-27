@@ -7,7 +7,8 @@ from app.lua.extractor import TranslationUnit
 
 
 _ARRAY_KEY_RE = re.compile(r"^(?P<entry>.+)\.(?P<field>text|unlock)\[(?P<index>\d+)\]$")
-_MISC_ARRAY_KEY_RE = re.compile(r"^(?P<entry>misc\.quips\..+)\[(?P<index>\d+)\]$")
+_MISC_ARRAY_KEY_RE = re.compile(r"^(?P<entry>misc\.[^.]+\..+)\[(?P<index>\d+)\]$")
+_MISC_SCALAR_KEY_RE = re.compile(r"^misc\.[^.]+\..+")
 
 
 @dataclass(frozen=True)
@@ -60,12 +61,12 @@ def group_translation_units(units: list[TranslationUnit]) -> list[TranslationEnt
 def _split_unit_key(unit_key: str) -> tuple[str, str, int]:
     if unit_key.endswith(".name"):
         return unit_key.removesuffix(".name"), "name", 0
-    if unit_key.startswith(("misc.dictionary.", "misc.labels.")):
-        return unit_key, "name", 0
 
     misc_match = _MISC_ARRAY_KEY_RE.match(unit_key)
     if misc_match is not None:
         return misc_match.group("entry"), "text", int(misc_match.group("index"))
+    if _MISC_SCALAR_KEY_RE.match(unit_key):
+        return unit_key, "name", 0
 
     match = _ARRAY_KEY_RE.match(unit_key)
     if match is None:
