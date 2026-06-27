@@ -638,21 +638,24 @@ def translate_entry_preview_mod(
             )
         )
 
+    context_rows = _read_preview_rows(context_preview) if context_preview is not None else []
+    seeded_names = _seed_pretranslated_names(work_items, context_rows)
     pretranslated_names, name_failures = _translate_mod_entry_names(
         client_factory=_llm_client,
         model=llm_model,
         work_items=work_items,
         term_map=term_map,
         max_workers=llm_concurrency,
+        seed_names=seeded_names,
     )
-    context_rows = _read_preview_rows(context_preview) if context_preview is not None else []
     name_context = _join_prompt_contexts(
         _render_mod_name_glossary(work_items, pretranslated_names),
         _render_preview_translation_context(context_rows),
     )
     console.print(
         f"Name glossary entries={len(pretranslated_names)} "
-        f"failed={name_failures} context_rows={len(context_rows)}"
+        f"failed={name_failures} seeded={len(seeded_names)} "
+        f"context_rows={len(context_rows)}"
     )
 
     stats = _empty_preview_stats()
@@ -1589,15 +1592,18 @@ def _translate_mod_entry_names(
     work_items: list[EntryWorkItem],
     term_map: dict[str, str],
     max_workers: int,
+    seed_names: dict[str, str] | None = None,
 ) -> tuple[dict[str, str], int]:
+    seed_names = seed_names or {}
     name_items = [
         item
         for item in work_items
         if item.entry.name is not None
         and _is_specific_source_name(item.entry.name.source_text)
+        and item.entry.entry_key not in seed_names
     ]
     if not name_items:
-        return {}, 0
+        return dict(seed_names), 0
 
     def translate_name(item: EntryWorkItem) -> tuple[str, str | None]:
         client = client_factory()
@@ -1621,7 +1627,7 @@ def _translate_mod_entry_names(
             if callable(close):
                 close()
 
-    names: dict[str, str] = {}
+    names: dict[str, str] = dict(seed_names)
     failures = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(translate_name, item) for item in name_items]
@@ -1771,6 +1777,46 @@ def _render_mod_name_glossary(
         lines.append(f"- {source_name} -> {target_name} ({item.entry.entry_key})")
         lines.append(f"  If source says {source_name} Card, use {target_name}牌.")
     return "\n".join(lines) if len(lines) > 2 else ""
+
+
+def _seed_pretranslated_names(
+    work_items: list[EntryWorkItem],
+    context_rows: list[dict[str, object]],
+) -> dict[str, str]:
+    if not context_rows:
+        return {}
+    by_source = _accepted_preview_name_targets(context_rows)
+    seeds: dict[str, str] = {}
+    for item in work_items:
+        name_unit = getattr(item.entry, "name", None)
+        source_name = getattr(name_unit, "source_text", None)
+        if not isinstance(source_name, str):
+            continue
+        targets = by_source.get(_normalize_audit_term(source_name))
+        if targets is None or len(targets) != 1:
+            continue
+        seeds[item.entry.entry_key] = next(iter(targets))
+    return seeds
+
+
+def _accepted_preview_name_targets(
+    rows: list[dict[str, object]],
+) -> dict[str, set[str]]:
+    by_source: dict[str, set[str]] = {}
+    for row in rows:
+        if row.get("ok") is not True or row.get("needs_review") is True:
+            continue
+        source = row.get("source")
+        target_name = row.get("name")
+        if not isinstance(source, dict) or not isinstance(target_name, str):
+            continue
+        source_name = source.get("name")
+        if not isinstance(source_name, str) or not source_name.strip():
+            continue
+        if source_name == target_name:
+            continue
+        by_source.setdefault(_normalize_audit_term(source_name), set()).add(target_name)
+    return by_source
 
 
 def _entry_source_name_terms(work_items: list[EntryWorkItem]) -> list[tuple[str, str]]:

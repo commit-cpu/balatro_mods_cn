@@ -1030,6 +1030,109 @@ def test_translate_entry_preview_mod_uses_name_prepass_for_label_only_entries(
     assert row["token_errors"] == []
 
 
+def test_translate_entry_preview_mod_seeds_name_prepass_from_context_preview(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+    keys_file = tmp_path / "rerun_keys.txt"
+    keys_file.write_text("descriptions.Other.fam_sapphire_seal_seal\n", encoding="utf-8")
+    context_preview = tmp_path / "base_preview.jsonl"
+    context_preview.write_text(
+        json.dumps(
+            {
+                "entry_key": "misc.labels.fam_sapphire_seal_seal",
+                "ok": True,
+                "needs_review": False,
+                "source": {"name": "Sapphire Seal", "text": [], "unlock": []},
+                "name": "宝石蓝蜡封",
+                "text": [],
+                "unlock": [],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Other.fam_sapphire_seal_seal.name", "Sapphire Seal"),
+                FakeUnit(
+                    "descriptions.Other.fam_sapphire_seal_seal.text[0]",
+                    "Creates a {C:blue}Spectral{} card",
+                ),
+            ]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate(self, **kwargs):
+            raise AssertionError("context-preview name seed should skip name prepass")
+
+        def translate_entry(self, *, name_text, **kwargs):
+            assert name_text == "Sapphire Seal"
+
+            class Result:
+                name = "错误译名"
+                text = ["生成一张{C:blue}幻灵牌{}"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr("app.cli.main._entry_style_examples", lambda **kwargs: "")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--entry-keys-file",
+            str(keys_file),
+            "--context-preview",
+            str(context_preview),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["name"] == "宝石蓝蜡封"
+
+
 def test_translate_entry_preview_mod_writes_grouped_jsonl(monkeypatch, tmp_path) -> None:
     monkeypatch.delenv("LLM_CONCURRENCY", raising=False)
     source = tmp_path / "localization" / "default.lua"

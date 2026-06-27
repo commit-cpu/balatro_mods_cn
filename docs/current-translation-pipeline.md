@@ -132,6 +132,8 @@ bash -lc 'set -a; source .env; set +a; uv run --frozen python -m app.cli.main tr
 
 name prepass 使用当前 entry 的 RAG/glossary refs，但会过滤容易污染复合名称的非原版单词级引用。例如 `Gilded Seal` 不应被 `partner_api` 的 `Gilded -> 黄金伙伴` 带偏。它还会从 frozen locked term map 中提取原版组合词模式：如果存在多条 `* Seal -> *蜡封`，则向 name prompt 添加 `Seal -> 蜡封` 和若干 `Gold Seal -> 金色蜡封` 之类的同模式参考。
 
+重跑问题 entry 时，`--context-preview` 会从旧 preview 中读取 `ok=true && needs_review=false` 的 name/label 对照。如果某个英文 name 在旧 preview 中只有一个中文译名，翻译器会把它作为 name prepass seed 直接复用；若旧 preview 自己已经多译，则不会自动选边，交由 audit 的 name inconsistency 处理。
+
 ## 风格参考
 
 `app/llm/assets/balatro_origin_style_pack.json` 是预构建的官方 Balatro EN/ZH 对照资产，不在每次翻译时临时抽样。它由下面命令生成：
@@ -428,7 +430,7 @@ uv run --frozen pytest -q
 
 2. 问题 entry 重跑
    - `audit-rerun-keys` 从 `audit-entry-output` 的 failed / needs_review / residual English / untranslated / label-name mismatch / name inconsistency 输出中生成重跑清单；`severity=review` 的英文残留和未翻译项不会默认重跑。
-   - `translate-entry-preview-mod --entry-keys-file --context-preview` 只重跑清单里的 entry，并把旧 preview 中已通过 rows 作为 mod-local glossary/context；过滤模式下不使用默认 `--limit 20` 截断清单。
+   - `translate-entry-preview-mod --entry-keys-file --context-preview` 只重跑清单里的 entry，并把旧 preview 中已通过 rows 作为 mod-local glossary/context；无歧义的旧 name/label 对照会直接 seed name prepass；过滤模式下不使用默认 `--limit 20` 截断清单。
    - `merge-entry-preview` 用重跑结果替换原 preview 中同 `entry_key` 的 rows，并把新增 rows 追加到末尾。
    - 重跑时仍带上当前批次的 mod-local glossary 和 label/name 对照。
 
