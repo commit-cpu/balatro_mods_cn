@@ -369,11 +369,11 @@ LuaJIT 编译校验
 
 - `app/lua/extractor.py` 新增 `_extract_misc_units` / `_field_key`，misc 单元走行级预览路径，entry 级流程自动过滤。
 - `app/rag/mod_terms.py` + CLI `scan-mod-terms` 产出候选表。
-- `app/rag/term_checker.py` + CLI `check-terms` 做锁定术语审查（styled + exact，跳过 identity 映射）。
+- `app/rag/term_checker.py` + CLI `check-terms` 做锁定术语审查（styled + context-aware exact，跳过 identity 映射）。
 - `app/llm/translator.py` 的 `TranslationReference` 加 `tier`，prompt 分三段渲染。
-- entry preview 每批冻结 `build_locked_term_map` 并哈希为 `brief_version`，违规进 `review.term_violations`。
-- `app/llm/translator.py` 增加 entry quality reviewer 和 revision prompt；`review.retry_history` 记录自动重译原因。
-- name prepass 生成批次内全局 name glossary，并注入每个 entry prompt。
+- entry preview 每批冻结 `build_locked_term_map` 并哈希为 `brief_version`，同时保留 locked term 的 context metadata，违规进 `review.term_violations`。
+- `app/llm/translator.py` 增加 entry quality reviewer 和 revision prompt；初次 token mismatch 和 quality review 都可触发一次 revision，`review.retry_history` 记录自动重译原因。
+- name prepass 生成批次内全局 name glossary，并注入每个 entry prompt；相同英文 name 出现多译时优先采用 description entry 译名，回填 label-only 条目。
 - 原版名称模式可推断复合词后缀，例如 `Seal -> 蜡封`；非原版跨类别精确同名引用和单词级误导引用会在 name prepass 中过滤，类别由 `descriptions.<Category>` 动态推导，不依赖特定 mod。
 - label-only 条目直接使用 name prepass 结果，不再调用 entry translator 生成空 body。
 - 完整 mod brief 结构、reducer 合并、全文件 final reviewer 仍属 Phase 3-4。

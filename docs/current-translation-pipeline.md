@@ -41,6 +41,7 @@
 - `build-style-pack` 可从 `Balatro__Origin` 预构建官方中英对照风格包，默认写入 `app/llm/assets/balatro_origin_style_pack.json`；当前资产包含 12 个 description 类别，每类至少 10 条参考。
 - `apply-entry-preview` 可从 preview JSONL 生成新的 `zh_CN.lua`；默认只写安全子集，传 `--table-level` 时支持 `text[]` / `unlock[]` 行数变化。
 - name prepass 会过滤明显误导的非原版跨类别 name 引用和单词级引用，并为 label-only 条目直接生成 name preview，避免空 body 被 LLM 生成说明文字后触发 token error。
+- 初次 entry 翻译若出现 token mismatch，会带 token error feedback 自动 revision 一次；revision 仍有 token error 才保留失败。
 
 ## 数据与服务
 
@@ -119,8 +120,8 @@ bash -lc 'set -a; source .env; set +a; uv run --frozen python -m app.cli.main tr
 4. RAG 检索 references。
 5. 选择 style references：官方同类样例优先；原版没有的自定义类别从 SQLite TM 取同类已翻译样例；最后才用语义 fallback。
 6. LLM 按完整 entry 翻译，不按英文原行逐行翻译。
-7. 程序恢复 token，并校验 token identity。
-8. 先翻译本批全部可用 `name` 字段，形成 mod-wide name glossary；后续每个 entry prompt 都会带上这份对照。
+7. 程序恢复 token，并校验 token identity；若初次结果 token mismatch，带 token error feedback 自动 revision 一次。
+8. 先翻译本批全部可用 `name` 字段，形成 mod-wide name glossary；同一英文 name 在本批出现多个译名时，优先采用 description entry 的译名并回填 label-only 条目，后续每个 entry prompt 都会带上这份对照。
 9. 若 token 正常，LLM reviewer 检查中文语序、机械英文结构和明显语义偏移；如需修订，带 reviewer feedback 自动重译一次。
 10. 程序按中文视觉宽度重排为 `text[]` / `unlock[]`。
 11. credit line 原样追加回 `text[]`。
@@ -131,6 +132,8 @@ bash -lc 'set -a; source .env; set +a; uv run --frozen python -m app.cli.main tr
 13. 写出 JSONL 预览，不修改 Lua。
 
 name prepass 使用当前 entry 的 RAG/glossary refs，但会过滤容易污染名称的非原版跨类别引用。entry 的期望类别从 `descriptions.<Category>` 动态推导为 `<category>_name` / `<category>_description_line`，所以 Sleeve、Partner、Seal、Enhanced 等自定义类别不需要硬编码。精确同名引用只有来自 `balatro_origin` 或同 context 时才进入 name prompt；例如 Enhanced 的 `Gilded` 不应被 Partner 的 `Gilded -> 黄金伙伴` 带偏。复合名称中的非原版单词级引用也会被过滤，例如 `Gilded Seal` 不应被 `partner_api` 的 `Gilded -> 黄金伙伴` 带偏。它还会从 frozen locked term map 中提取原版组合词模式：如果存在多条 `* Seal -> *蜡封`，则向 name prompt 添加 `Seal -> 蜡封` 和若干 `Gold Seal -> 金色蜡封` 之类的同模式参考。
+
+locked term checker 也保留 term 的 `context_type` / `mod_id` 元数据。`styled` term 仍按锁定术语检查；`exact` term 只有来自 `balatro_origin` 或同 context 时才触发 review，避免 Partner、Sleeve、Enhanced 等自定义类别之间的同名污染。
 
 重跑问题 entry 时，`--context-preview` 会从旧 preview 中读取 `ok=true && needs_review=false` 的 name/label 对照。如果某个英文 name 在旧 preview 中只有一个中文译名，翻译器会把它作为 name prepass seed 直接复用；若旧 preview 自己已经多译，则不会自动选边，交由 audit 的 name inconsistency 处理。
 
@@ -301,8 +304,8 @@ LLM 返回完整未换行中文字符串，程序负责换行。
 - `target_units`: 后续 patch 应该写入的 Lua unit_key。
 - `source`: 源英文 entry，用于审查和 diff。
 - `rag_refs`: 实际送给 LLM 的翻译记忆引用，每条带 `context_type` 和 `tier`（`locked` / `same_context` / `loose`）。
-- `needs_review`: 是否需要人工复审。当前由锁定术语违规、LLM reviewer 的 naturalness/meaning warning 触发；如果 reviewer 自动重译后通过，则为 `false`。
-- `review`: 审查明细。`term_violations` 为锁定术语违规（`kind` 为 `styled` 或 `exact`）；`naturalness_warnings` / `meaning_warnings` 为当前最终译文的 LLM reviewer 警告；`rewrite_hint` 为 reviewer 建议；`retry_history` 记录本 entry 是否因为质量 review 自动重译过。
+- `needs_review`: 是否需要人工复审。当前由 token error、锁定术语违规、LLM reviewer 的 naturalness/meaning warning 触发；如果 token/quality 自动重译后通过，则为 `false`。
+- `review`: 审查明细。`term_violations` 为锁定术语违规（`kind` 为 `styled` 或 `exact`）；`naturalness_warnings` / `meaning_warnings` 为当前最终译文的 LLM reviewer 警告；`rewrite_hint` 为 reviewer 建议；`retry_history` 记录本 entry 是否因为 token error 或质量 review 自动重译过。
 - `brief_version`: 本批使用的 frozen 锁定术语表哈希，用于可复现性审计。
 
 `apply-entry-preview` 有两种写回模式：

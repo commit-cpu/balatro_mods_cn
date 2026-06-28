@@ -37,7 +37,12 @@ from app.rag.glossary import retrieve_glossary_references
 from app.rag.mod_terms import scan_mod_term_candidates
 from app.rag.qdrant_store import QdrantTmStore
 from app.rag.retriever import retrieve_references
-from app.rag.term_checker import build_locked_term_map, check_entry_terms
+from app.rag.term_checker import (
+    LockedTermInfo,
+    build_locked_term_info,
+    build_locked_term_map,
+    check_entry_terms,
+)
 from app.rag.tm_importer import import_locale_pair
 from app.rag.vector_sync import sync_vector_outbox
 
@@ -212,6 +217,7 @@ def check_terms(
     settings = load_settings()
     db_path = Path(settings.sqlite.database_path)
     term_map = build_locked_term_map(db_path, mod_id=mod_id)
+    term_info = build_locked_term_info(db_path, mod_id=mod_id)
     console.print(
         f"Locked terms: {len(term_map)} "
         f"(mod_id filter={mod_id or 'none'})"
@@ -233,7 +239,13 @@ def check_terms(
                 "unlock": row.get("unlock") or [],
             }
             violations = check_entry_terms(
-                source=source, target=target, term_map=term_map
+                source=source,
+                target=target,
+                term_map=term_map,
+                term_info=term_info,
+                expected_context_types=_entry_expected_context_types(
+                    str(row.get("entry_key", ""))
+                ),
             )
             if violations:
                 flagged_entries += 1
@@ -574,6 +586,7 @@ def translate_entry_preview_mod(
     # Frozen locked-term map for the whole batch: one brief_version, one
     # glossary used by every entry's term-consistency review.
     term_map = build_locked_term_map(db_path)
+    term_info = build_locked_term_info(db_path)
     brief_version = _brief_version(term_map)
     style_pack = load_style_pack(DEFAULT_STYLE_PACK_PATH)
 
@@ -648,6 +661,9 @@ def translate_entry_preview_mod(
         max_workers=llm_concurrency,
         seed_names=seeded_names,
     )
+    pretranslated_names = _canonicalize_pretranslated_names(
+        work_items, pretranslated_names
+    )
     name_context = _join_prompt_contexts(
         _render_mod_name_glossary(work_items, pretranslated_names),
         _render_preview_translation_context(context_rows),
@@ -669,6 +685,7 @@ def translate_entry_preview_mod(
                     model=llm_model,
                     max_width=max_width,
                     term_map=term_map,
+                    term_info=term_info,
                     brief_version=brief_version,
                     group=group,
                     name_context=name_context,
@@ -1644,6 +1661,42 @@ def _translate_mod_entry_names(
     return names, failures
 
 
+def _canonicalize_pretranslated_names(
+    work_items: list[EntryWorkItem],
+    names: dict[str, str],
+) -> dict[str, str]:
+    by_source: dict[str, list[EntryWorkItem]] = {}
+    for item in work_items:
+        name_unit = getattr(item.entry, "name", None)
+        source_name = getattr(name_unit, "source_text", None)
+        if not isinstance(source_name, str) or item.entry.entry_key not in names:
+            continue
+        by_source.setdefault(_normalize_audit_term(source_name), []).append(item)
+
+    canonicalized = dict(names)
+    for items in by_source.values():
+        targets = {
+            canonicalized[item.entry.entry_key]
+            for item in items
+            if item.entry.entry_key in canonicalized
+        }
+        if len(targets) <= 1:
+            continue
+        canonical_item = min(
+            items,
+            key=lambda item: (
+                1 if item.entry.entry_key.startswith("misc.labels.") else 0,
+                item.index,
+            ),
+        )
+        canonical = canonicalized.get(canonical_item.entry.entry_key)
+        if not isinstance(canonical, str) or not canonical:
+            continue
+        for item in items:
+            canonicalized[item.entry.entry_key] = canonical
+    return canonicalized
+
+
 def _name_translation_references(
     item: EntryWorkItem,
     *,
@@ -1873,6 +1926,7 @@ def _translate_entry_work_group(
     model: str,
     max_width: int,
     term_map: dict[str, str],
+    term_info: dict[str, LockedTermInfo] | None,
     brief_version: str,
     group: EntryWorkGroup,
     name_context: str = "",
@@ -1899,6 +1953,7 @@ def _translate_entry_work_group(
                 max_width=max_width,
                 tier_by_id=item.tier_by_id,
                 term_map=term_map,
+                term_info=term_info,
                 brief_version=brief_version,
                 style_examples=_append_translation_contexts(
                     item.style_examples,
@@ -2003,6 +2058,7 @@ def _translate_entry_preview_row(
     max_width: int,
     tier_by_id: dict[int, str] | None = None,
     term_map: dict[str, str] | None = None,
+    term_info: dict[str, LockedTermInfo] | None = None,
     brief_version: str = "",
     style_examples: str = "",
     pretranslated_name: str | None = None,
@@ -2014,6 +2070,7 @@ def _translate_entry_preview_row(
             references=references,
             tier_by_id=tier_by_id,
             term_map=term_map or {},
+            term_info=term_info,
             brief_version=brief_version,
         )
 
@@ -2061,6 +2118,7 @@ def _translate_entry_preview_row(
         unlock=translated.unlock,
         ok=ok,
         term_map=term_map or {},
+        term_info=term_info,
         quality_review=quality_review,
         retry_history=retry_history,
     )
@@ -2095,6 +2153,7 @@ def _entry_name_only_preview_row(
     references,
     tier_by_id: dict[int, str] | None = None,
     term_map: dict[str, str],
+    term_info: dict[str, LockedTermInfo] | None = None,
     brief_version: str,
 ) -> dict[str, object]:
     text: list[str] = []
@@ -2114,6 +2173,7 @@ def _entry_name_only_preview_row(
         unlock=unlock,
         ok=True,
         term_map=term_map,
+        term_info=term_info,
     )
     return {
         "entry_key": entry.entry_key,
@@ -2261,11 +2321,37 @@ def _maybe_retry_entry_translation(
 ):
     retry_history: list[dict[str, object]] = []
     quality_review = _empty_quality_review()
-    if translated.token_errors:
-        return translated, quality_review, retry_history
 
     review_method = getattr(translator, "review_entry_translation", None)
     revise_method = getattr(translator, "revise_entry_translation", None)
+    if translated.token_errors:
+        if not callable(revise_method):
+            return translated, quality_review, retry_history
+        retry_history.append(
+            {
+                "reason": "token_errors",
+                "initial_token_errors": list(translated.token_errors),
+            }
+        )
+        revised = revise_method(
+            name_text=entry.name.source_text if entry.name is not None else None,
+            body_text=body_text,
+            unlock_text=entry.combined_unlock,
+            current_name=(
+                pretranslated_name if pretranslated_name is not None else translated.name
+            ),
+            current_text=translated.text,
+            current_unlock=translated.unlock,
+            review_feedback=_token_error_feedback(translated.token_errors),
+            references=references,
+            max_width=max_width,
+            style_examples=style_examples,
+        )
+        if revised.token_errors:
+            retry_history[-1]["retry_token_errors"] = revised.token_errors
+            return translated, quality_review, retry_history
+        translated = revised
+
     if not callable(review_method) or not callable(revise_method):
         return translated, quality_review, retry_history
 
@@ -2336,6 +2422,15 @@ def _quality_review_feedback(review) -> str:
     return "\n".join(parts) if parts else "Revise the translation to sound natural."
 
 
+def _token_error_feedback(token_errors: list[str]) -> str:
+    return (
+        "Fix the translation so its style/control tokens exactly match the source. "
+        "Do not add, remove, duplicate, or reorder Balatro tokens such as {C:...}, "
+        "{}, and #1#.\nToken errors: "
+        + "; ".join(token_errors)
+    )
+
+
 def _entry_error_row(
     *,
     entry,
@@ -2373,6 +2468,7 @@ def _entry_review(
     unlock: list[str],
     ok: bool,
     term_map: dict[str, str],
+    term_info: dict[str, LockedTermInfo] | None = None,
     quality_review=None,
     retry_history: list[dict[str, object]] | None = None,
 ) -> dict[str, object]:
@@ -2386,6 +2482,8 @@ def _entry_review(
                 source=source,
                 target={"name": name, "text": text, "unlock": unlock},
                 term_map=term_map,
+                term_info=term_info,
+                expected_context_types=_entry_expected_context_types(entry.entry_key),
             )
         ]
     quality = quality_review or _empty_quality_review()

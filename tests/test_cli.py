@@ -13,6 +13,7 @@ from app.cli.main import (
 )
 from app.db.migrate import migrate
 from app.llm.style_pack import StyleCategory, StyleExample, StylePack
+from app.rag.term_checker import LockedTermInfo, check_entry_terms
 
 
 def test_cli_has_rag_commands() -> None:
@@ -173,6 +174,43 @@ def test_name_prepass_allows_origin_exact_reference_across_contexts() -> None:
         Ref(),
         expected_context_types={"enhanced_name"},
     )
+
+
+def test_term_review_skips_non_origin_exact_term_from_unrelated_context() -> None:
+    violations = check_entry_terms(
+        source={"name": "Gilded", "text": [], "unlock": []},
+        target={"name": "镀金", "text": [], "unlock": []},
+        term_map={"Gilded": "黄金伙伴"},
+        term_info={
+            "Gilded": LockedTermInfo(
+                target="黄金伙伴",
+                context_types=frozenset({"partner_name"}),
+                mod_ids=frozenset({"partner_api"}),
+            )
+        },
+        expected_context_types={"enhanced_name", "enhanced_description_line"},
+    )
+
+    assert violations == []
+
+
+def test_term_review_keeps_origin_exact_term_across_contexts() -> None:
+    violations = check_entry_terms(
+        source={"name": "Steel Card", "text": [], "unlock": []},
+        target={"name": "钢牌", "text": [], "unlock": []},
+        term_map={"Steel Card": "钢铁牌"},
+        term_info={
+            "Steel Card": LockedTermInfo(
+                target="钢铁牌",
+                context_types=frozenset({"enhanced_name"}),
+                mod_ids=frozenset({"balatro_origin"}),
+            )
+        },
+        expected_context_types={"joker_name", "joker_description_line"},
+    )
+
+    assert len(violations) == 1
+    assert violations[0].term == "Steel Card"
 
 
 def test_entry_style_examples_prefers_tm_custom_category_before_official_fallback(
@@ -1166,6 +1204,94 @@ def test_translate_entry_preview_name_prepass_ignores_unrelated_exact_context_re
     assert row["name"] == "镀金"
 
 
+def test_translate_entry_preview_canonicalizes_duplicate_source_names(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Other.fam_sapphire_seal_seal.name", "Sapphire Seal"),
+                FakeUnit("descriptions.Other.fam_sapphire_seal_seal.text[0]", "Creates a card"),
+                FakeUnit("misc.labels.fam_sapphire_seal_seal", "Sapphire Seal"),
+            ]
+
+    class FakeRetrieval:
+        references = []
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    translated_names = iter(["蓝宝石蜡封", "宝蓝蜡封"])
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate(self, *, source_text, **kwargs):
+            class Result:
+                candidate_text = next(translated_names)
+                token_errors = []
+
+            return Result()
+
+        def translate_entry(self, *, name_text, **kwargs):
+            class Result:
+                name = "蓝宝石蜡封"
+                text = ["生成一张牌"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr("app.cli.main._entry_style_examples", lambda **kwargs: "")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "2",
+            "--concurrency",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    by_key = {row["entry_key"]: row for row in rows}
+    assert by_key["descriptions.Other.fam_sapphire_seal_seal"]["name"] == "蓝宝石蜡封"
+    assert by_key["misc.labels.fam_sapphire_seal_seal"]["name"] == "蓝宝石蜡封"
+
+
 def test_translate_entry_preview_mod_seeds_name_prepass_from_context_preview(
     monkeypatch,
     tmp_path,
@@ -1844,6 +1970,99 @@ def test_translate_entry_preview_keeps_original_when_quality_retry_breaks_tokens
     assert row["review"]["naturalness_warnings"] == ["语序需要调整"]
     assert row["review"]["retry_history"][0]["retry_token_errors"] == [
         "text: Token count mismatch"
+    ]
+
+
+def test_translate_entry_preview_retries_initial_token_errors(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Joker.j_planet.name", "Astrophysicist"),
+                FakeUnit(
+                    "descriptions.Joker.j_planet.text[0]",
+                    "Create a {C:blue}Planet{} card",
+                ),
+            ]
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate_entry(self, **kwargs):
+            class Result:
+                name = "天体物理学家"
+                text = ["创建一张{C:blue}星球{}{C:inactive}牌"]
+                unlock = []
+                token_errors = ["text: Extra token: '{C:inactive}'"]
+
+            return Result()
+
+        def revise_entry_translation(self, *, review_feedback, **kwargs):
+            assert "Extra token" in review_feedback
+
+            class Result:
+                name = "天体物理学家"
+                text = ["创建一张{C:blue}星球{}牌"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["ok"] is True
+    assert row["token_errors"] == []
+    assert row["text"] == ["创建一张{C:blue}星球{}牌"]
+    assert row["review"]["retry_history"][0]["reason"] == "token_errors"
+    assert row["review"]["retry_history"][0]["initial_token_errors"] == [
+        "text: Extra token: '{C:inactive}'"
     ]
 
 
@@ -2662,6 +2881,62 @@ def test_audit_entry_output_classifies_residual_english_severity(tmp_path) -> No
     }
     assert untranslated["descriptions.Joker.j_english.name"]["severity"] == "rerun"
     assert untranslated["descriptions.Joker.j_rna.name"]["severity"] == "review"
+
+
+def test_audit_entry_output_reruns_lowercase_gameplay_residuals(tmp_path) -> None:
+    source = tmp_path / "localization" / "en-us.lua"
+    source.parent.mkdir()
+    source.write_text(
+        """return {
+    descriptions={
+        Tarot={
+            c_one={name="One", text={"Convert one card"}},
+        },
+        Edition={
+            e_null={name="Null", text={"+null chips"}},
+        },
+    },
+}
+""",
+        encoding="utf-8",
+    )
+    target = tmp_path / "localization" / "zh_CN.lua"
+    target.write_text(
+        """return {
+    descriptions={
+        Tarot={
+            c_one={name="一", text={"转化{C:attention}one{}张牌"}},
+        },
+        Edition={
+            e_null={name="空", text={"{C:blue}+null{}筹码"}},
+        },
+    },
+}
+""",
+        encoding="utf-8",
+    )
+    report = tmp_path / "audit.json"
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "audit-entry-output",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/en-us.lua",
+            "--target",
+            "localization/zh_CN.lua",
+            "--json-output",
+            str(report),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    by_key = {item["unit_key"]: item for item in payload["residual_english"]}
+    assert by_key["descriptions.Tarot.c_one.text[0]"]["severity"] == "rerun"
+    assert by_key["descriptions.Edition.e_null.text[0]"]["severity"] == "rerun"
 
 
 def test_merge_entry_preview_replaces_rows_by_entry_key(tmp_path) -> None:
