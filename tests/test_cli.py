@@ -3397,12 +3397,31 @@ def test_translate_entry_loop_runs_full_then_rerun_until_clean(monkeypatch, tmp_
 
     def fake_translate_entry_preview_mod(**kwargs):
         calls.append(("translate", kwargs))
+        assert kwargs["brief"] == work_dir / "mod_translation_brief.json"
         out = kwargs["output"]
         assert isinstance(out, Path)
         if kwargs.get("entry_keys_file") is None:
-            rows = [{"entry_key": "descriptions.Joker.j_one", "ok": True}]
+            rows = [
+                {
+                    "entry_key": "descriptions.Joker.j_one",
+                    "ok": True,
+                    "needs_review": False,
+                    "apply_mode": "unit",
+                    "source": {"name": "One"},
+                    "name": "一",
+                }
+            ]
         else:
-            rows = [{"entry_key": "descriptions.Joker.j_one", "ok": True, "name": "一"}]
+            rows = [
+                {
+                    "entry_key": "descriptions.Joker.j_one",
+                    "ok": True,
+                    "needs_review": False,
+                    "apply_mode": "unit",
+                    "source": {"name": "One"},
+                    "name": "一",
+                }
+            ]
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(
             "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
@@ -3501,6 +3520,8 @@ def test_translate_entry_loop_runs_full_then_rerun_until_clean(monkeypatch, tmp_
     manifest = json.loads((work_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["completed_rounds"] == 2
     assert manifest["stopped_reason"] == "no_rerun_keys"
+    assert manifest["brief_path"] == str(work_dir / "mod_translation_brief.json")
+    assert manifest["brief_version"].startswith("sha256:")
     assert manifest["final_audit_summary"] == {
         "needs_review": 0,
         "residual_english": 0,
@@ -3510,6 +3531,8 @@ def test_translate_entry_loop_runs_full_then_rerun_until_clean(monkeypatch, tmp_
     assert (work_dir / "round_00_rerun_keys.txt").read_text(encoding="utf-8").splitlines() == [
         "descriptions.Joker.j_one"
     ]
+    brief = json.loads((work_dir / "mod_translation_brief.json").read_text(encoding="utf-8"))
+    assert brief["name_map"] == {"One": "一"}
     assert "Translation loop complete" in result.output
     assert "stopped_reason=no_rerun_keys" in result.output
 

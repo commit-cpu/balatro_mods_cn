@@ -4,6 +4,7 @@ from pathlib import Path
 from app.cli.translation_loop import (
     LoopRoundArtifacts,
     audit_has_rerunnable_issues,
+    default_loop_brief_path,
     default_loop_work_dir,
     loop_round_artifacts,
     write_loop_manifest,
@@ -29,6 +30,12 @@ def test_loop_round_artifacts_use_stable_traceable_names(tmp_path) -> None:
     assert round1.target == work_dir / "round_01_zh_CN.lua"
     assert round1.audit == work_dir / "round_01_audit.json"
     assert round1.rerun_keys == work_dir / "round_01_rerun_keys.txt"
+
+
+def test_default_loop_brief_path_lives_under_work_dir(tmp_path) -> None:
+    assert default_loop_brief_path(tmp_path / "loop") == (
+        tmp_path / "loop" / "mod_translation_brief.json"
+    )
 
 
 def test_audit_has_rerunnable_issues_ignores_review_only_residuals() -> None:
@@ -81,6 +88,8 @@ def test_write_loop_manifest_records_round_files_and_final_summary(tmp_path) -> 
         stopped_reason="no_rerun_keys",
         rounds=artifacts,
         final_audit_summary={"needs_review": 0, "residual_english": 2},
+        brief_path=work_dir / "mod_translation_brief.json",
+        brief_version="sha256:abc",
     )
 
     payload = json.loads((work_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -91,6 +100,8 @@ def test_write_loop_manifest_records_round_files_and_final_summary(tmp_path) -> 
     assert payload["max_rounds"] == 3
     assert payload["completed_rounds"] == 2
     assert payload["stopped_reason"] == "no_rerun_keys"
+    assert payload["brief_path"] == str(work_dir / "mod_translation_brief.json")
+    assert payload["brief_version"] == "sha256:abc"
     assert payload["final_audit_summary"] == {
         "needs_review": 0,
         "residual_english": 2,

@@ -6,6 +6,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+from app.cli.translation_brief import default_brief_path
+
 
 @dataclass(frozen=True)
 class LoopRoundArtifacts:
@@ -20,6 +22,10 @@ class LoopRoundArtifacts:
 def default_loop_work_dir(repo: Path) -> Path:
     name = _safe_artifact_name(repo.name or "mod")
     return Path("data/artifacts") / f"{name}_entry_translate_loop"
+
+
+def default_loop_brief_path(work_dir: Path) -> Path:
+    return default_brief_path(work_dir)
 
 
 def loop_round_artifacts(work_dir: Path, round_index: int) -> LoopRoundArtifacts:
@@ -62,6 +68,8 @@ def write_loop_manifest(
     stopped_reason: str,
     rounds: list[LoopRoundArtifacts],
     final_audit_summary: dict[str, Any] | None,
+    brief_path: Path | None = None,
+    brief_version: str = "",
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -72,6 +80,8 @@ def write_loop_manifest(
         "max_rounds": max_rounds,
         "completed_rounds": completed_rounds,
         "stopped_reason": stopped_reason,
+        "brief_path": str(brief_path) if brief_path is not None else "",
+        "brief_version": brief_version,
         "final_audit_summary": final_audit_summary or {},
         "rounds": [
             {

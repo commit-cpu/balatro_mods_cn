@@ -17,6 +17,7 @@ from rich.table import Table
 from app.config import load_settings
 from app.cli.translation_loop import (
     audit_has_rerunnable_issues,
+    default_loop_brief_path,
     default_loop_work_dir,
     loop_round_artifacts,
     write_loop_manifest,
@@ -24,8 +25,11 @@ from app.cli.translation_loop import (
 from app.cli.translation_brief import (
     TranslationBrief,
     apply_brief_name_seeds,
+    brief_version as translation_brief_version,
     load_translation_brief,
     render_brief_context,
+    save_translation_brief,
+    update_brief_from_preview,
 )
 from app.db.migrate import migrate as run_migrations
 from app.llm.client import OpenAICompatibleClient
@@ -351,10 +355,19 @@ def translate_entry_loop(
     max_rounds: int = typer.Option(3, min=1),
     include_needs_review: bool = typer.Option(False),
     validate_lua: bool = typer.Option(True),
+    brief: Path | None = typer.Option(None, exists=False, dir_okay=False),
 ) -> None:
     """Run full entry translation, apply, audit, rerun, and merge as a loop."""
     resolved_work_dir = (work_dir or default_loop_work_dir(repo)).resolve()
     resolved_work_dir.mkdir(parents=True, exist_ok=True)
+    resolved_brief_path = brief or default_loop_brief_path(resolved_work_dir)
+    translation_brief = load_translation_brief(
+        resolved_brief_path,
+        mod_id=repo.name,
+        repo=repo,
+        source=source,
+    )
+    current_brief_version = translation_brief_version(translation_brief)
     manifest_path = resolved_work_dir / "manifest.json"
     final_output = output if output.is_absolute() else repo / output
     rounds = []
@@ -387,6 +400,7 @@ def translate_entry_loop(
                 concurrency=concurrency,
                 entry_keys_file=None,
                 context_preview=None,
+                brief=resolved_brief_path,
             )
         else:
             if previous_keys is None or previous_preview is None:
@@ -402,6 +416,7 @@ def translate_entry_loop(
                 concurrency=concurrency,
                 entry_keys_file=previous_keys,
                 context_preview=previous_preview,
+                brief=resolved_brief_path,
             )
             merge_entry_preview(
                 base=previous_preview,
@@ -430,6 +445,16 @@ def translate_entry_loop(
 
         report = json.loads(artifacts.audit.read_text(encoding="utf-8"))
         final_summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        update_brief_from_preview(
+            translation_brief,
+            _read_preview_rows(artifacts.preview),
+            audit_report=report,
+            preview_path=artifacts.preview,
+            audit_path=artifacts.audit,
+            round_index=round_index,
+        )
+        save_translation_brief(resolved_brief_path, translation_brief)
+        current_brief_version = translation_brief_version(translation_brief)
         keys = _audit_rerun_keys(report)
         artifacts.rerun_keys.write_text(
             "\n".join(keys) + ("\n" if keys else ""),
@@ -452,6 +477,8 @@ def translate_entry_loop(
             stopped_reason="running",
             rounds=rounds,
             final_audit_summary=final_summary,
+            brief_path=resolved_brief_path,
+            brief_version=current_brief_version,
         )
 
         previous_preview = artifacts.preview
@@ -478,6 +505,8 @@ def translate_entry_loop(
         stopped_reason=stopped_reason,
         rounds=rounds,
         final_audit_summary=final_summary,
+        brief_path=resolved_brief_path,
+        brief_version=current_brief_version,
     )
     console.print(
         "Translation loop complete: "
