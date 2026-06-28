@@ -1,6 +1,6 @@
 # 当前翻译流程与项目进度
 
-更新日期：2026-06-27
+更新日期：2026-06-28
 
 本文记录当前代码已经实现的 Balatro 模组中文本地化流程、关键设计取舍、预览 JSONL 契约，以及下一步生成 `zh_CN.lua` 前必须满足的安全边界。
 
@@ -23,6 +23,9 @@
 - 已能先预翻译全模组 `name` 字段，生成 mod-wide EN/ZH 名称对照，并把该对照注入每个 entry 的 prompt。
 - 已能用原版 Balatro 名称模式辅助新增名称翻译，例如由 `Blue/Gold/Purple/Red Seal -> *蜡封` 推断 `Seal -> 蜡封`，避免把 seal 误译成“封印”。
 - 已能区分翻译质量状态 `needs_review` 与写回策略 `apply_mode`；中文自然换行导致的行数变化不再算质量问题。
+- 已能用 `translate-entry-loop` 串起全量 preview、apply、audit、rerun、merge 和再次 audit，形成可重复的闭环；每轮产物和最终状态写入 manifest，便于验收后复盘。
+- 已能在 preview consistency 阶段复用同类别内完全相同 source body 的最佳译文，避免同一英文模板在不同 entry 中翻出多套断句/用词；rerun merge 后也会对完整 preview 再跑一次一致性收敛。
+- 已能在 preview 阶段标记 `text[]` / `unlock[]` 中的 rerunnable 残留英文，例如 `lvl`、`Imaginary`、`Consumble`、`null`，避免这些坏译文直接进入 apply。
 
 还没有完成：
 
@@ -125,11 +128,15 @@ bash -lc 'set -a; source .env; set +a; uv run --frozen python -m app.cli.main tr
 9. 若 token 正常，LLM reviewer 检查中文语序、机械英文结构和明显语义偏移；如需修订，带 reviewer feedback 自动重译一次。
 10. 程序按中文视觉宽度重排为 `text[]` / `unlock[]`。
 11. credit line 原样追加回 `text[]`。
-12. 根据 row 结构计算 `apply_mode`：
+12. preview consistency 做 deterministic 后处理：
+   - 同一 `descriptions.<Category>` 内完全相同的 source `text[]` / `unlock[]` 会复用最佳已接受译文，避免重复模板翻译不一致。
+   - `text[]` / `unlock[]` 中的 rerunnable 残留英文会进入 `review.consistency_warnings`，并把 row 标成 `needs_review=true`。
+   - `name` 残留英文仍留给 audit 汇总，避免只因短专名或缩写导致整条正文无法写回。
+13. 根据 row 结构计算 `apply_mode`：
    - `unit`: 可以逐 unit 写回。
    - `table`: 只有 `text[]` / `unlock[]` 行数变化，需要 `--table-level`。
    - `blocked`: 结构不完整、LLM 失败或缺少必需字段，不能安全写回。
-13. 写出 JSONL 预览，不修改 Lua。
+14. 写出 JSONL 预览，不修改 Lua。
 
 name prepass 使用当前 entry 的 RAG/glossary refs，但会过滤容易污染名称的非原版跨类别引用。entry 的期望类别从 `descriptions.<Category>` 动态推导为 `<category>_name` / `<category>_description_line`，所以 Sleeve、Partner、Seal、Enhanced 等自定义类别不需要硬编码。精确同名引用只有来自 `balatro_origin` 或同 context 时才进入 name prompt；例如 Enhanced 的 `Gilded` 不应被 Partner 的 `Gilded -> 黄金伙伴` 带偏。复合名称中的非原版单词级引用也会被过滤，例如 `Gilded Seal` 不应被 `partner_api` 的 `Gilded -> 黄金伙伴` 带偏。它还会从 frozen locked term map 中提取原版组合词模式：如果存在多条 `* Seal -> *蜡封`，则向 name prompt 添加 `Seal -> 蜡封` 和若干 `Gold Seal -> 金色蜡封` 之类的同模式参考。
 
@@ -347,6 +354,52 @@ LLM 返回完整未换行中文字符串，程序负责换行。
 
 这样既能利用 API 并发，也能保证预览文件顺序稳定，便于审查和后续 patch。
 
+## 闭环翻译流程
+
+真实项目推荐先使用 `translate-entry-loop`，让全量翻译和 rerun 自动连接：
+
+```bash
+UV_CACHE_DIR=.cache/uv uv run --frozen python -m app.cli.main translate-entry-loop \
+  --repo data/repos/Familiar \
+  --source localization/en-us.lua \
+  --output localization/zh_CN.lua \
+  --work-dir data/artifacts/familiar_entry_translate_loop \
+  --limit 9999 \
+  --top-k 5 \
+  --max-width 18 \
+  --concurrency 8 \
+  --max-rounds 3
+```
+
+每轮固定产物：
+
+```text
+round_00_preview.jsonl
+round_00_zh_CN.lua
+round_00_audit.json
+round_00_rerun_keys.txt
+round_01_rerun.jsonl
+round_01_preview.jsonl
+round_01_zh_CN.lua
+round_01_audit.json
+round_01_rerun_keys.txt
+...
+manifest.json
+```
+
+`round_00` 是全量翻译。`round_01+` 使用上一轮 `rerun_keys` 和上一轮 preview 作为 `--context-preview`，只重跑问题 entry，再通过 `merge-entry-preview --safe-updates --apply-consistency` 合并回完整 preview。安全合并只接受 `ok=true && needs_review=false && apply_mode!=blocked` 的 rerun row，避免失败重跑覆盖上一轮可用译文。合并后会对完整 preview 再跑一致性收敛，让重复 source body 复用最佳已接受译文，并把正文/解锁文本中的 rerunnable 残留英文重新标成 `needs_review`。
+
+停止条件：
+
+- 当前 audit 不再产生 rerun keys：`stopped_reason=no_rerun_keys`。
+- 达到 `--max-rounds`：`stopped_reason=max_rounds`。这种情况说明还有问题需要人工或后续策略处理。
+
+最终 `--output` 会复制最后一轮的 `round_NN_zh_CN.lua`。验收时优先查看：
+
+- `manifest.json`：记录 repo、source、output、work_dir、每轮文件和最终 audit summary。
+- 最后一轮 `round_NN_audit.json`：看是否还存在 `needs_review`、`severity=rerun` 的 residual/untranslated、label/name mismatch、name inconsistency。
+- 最后一轮 `round_NN_rerun_keys.txt`：如果非空，说明达到 `max_rounds` 时仍有待处理 entry。
+
 ## 当前命令
 
 知识库：
@@ -369,6 +422,8 @@ uv run --frozen python -m app.cli.main audit-entry-output --repo ... --source ..
 uv run --frozen python -m app.cli.main audit-rerun-keys --audit data/artifacts/..._entry_translate_audit.json --output data/artifacts/..._rerun_keys.txt
 uv run --frozen python -m app.cli.main translate-entry-preview-mod --repo ... --source ... --entry-keys-file data/artifacts/..._rerun_keys.txt --context-preview data/artifacts/..._entry_translate_preview.jsonl --output data/artifacts/..._entry_translate_rerun.jsonl
 uv run --frozen python -m app.cli.main merge-entry-preview --base data/artifacts/..._entry_translate_preview.jsonl --updates data/artifacts/..._entry_translate_rerun.jsonl --output data/artifacts/..._entry_translate_preview_merged.jsonl
+uv run --frozen python -m app.cli.main merge-entry-preview --base data/artifacts/..._entry_translate_preview.jsonl --updates data/artifacts/..._entry_translate_rerun.jsonl --output data/artifacts/..._entry_translate_preview_merged.jsonl --safe-updates --apply-consistency
+uv run --frozen python -m app.cli.main translate-entry-loop --repo ... --source ... --output localization/zh_CN.lua --work-dir data/artifacts/..._entry_translate_loop
 ```
 
 术语与质量（Phase 1）：
@@ -422,6 +477,7 @@ uv run --frozen pytest -q
 - misc extractor 覆盖任意 `misc.<section>` 标量字符串和数组字符串，不只覆盖 `dictionary` / `labels` / `quips`。
 - reflow 中 `{...}` 样式 token 宽度为 0，`#1#` / `#2#` 变量宽度为 1。
 - Phase 1 质量基础：misc extractor 覆盖、`scan-mod-terms` 候选表、`check-terms` 术语审查、`audit-entry-output` 写回后审查、entry preview 的 `needs_review`/`review`/`brief_version`、RAG 参考分层、官方风格 examples、一次 LLM reviewer 自动重译。
+- `translate-entry-loop` 闭环运行：全量 preview、apply、audit、rerun keys、局部 rerun、安全 merge、完整 preview 一致性收敛、再次 apply/audit，产物写入 work-dir 和 `manifest.json`。
 
 ## 下一步
 
@@ -431,11 +487,10 @@ uv run --frozen pytest -q
    - 将 name prepass、人工确认译名和 reviewer 建议合并为 frozen mod brief。
    - 支持下一批翻译复用，避免每次重新猜译名。
 
-2. 问题 entry 重跑
-   - `audit-rerun-keys` 从 `audit-entry-output` 的 failed / needs_review / residual English / untranslated / label-name mismatch / name inconsistency 输出中生成重跑清单；`severity=review` 的英文残留和未翻译项不会默认重跑。
-   - `translate-entry-preview-mod --entry-keys-file --context-preview` 只重跑清单里的 entry，并把旧 preview 中已通过 rows 作为 mod-local glossary/context；无歧义的旧 name/label 对照会直接 seed name prepass；过滤模式下不使用默认 `--limit 20` 截断清单。
-   - `merge-entry-preview` 用重跑结果替换原 preview 中同 `entry_key` 的 rows，并把新增 rows 追加到末尾。
-   - 重跑时仍带上当前批次的 mod-local glossary 和 label/name 对照。
+2. 质量门继续增强
+   - 当前 `audit-entry-output` 已能在写回后发现 `null`、`lvl` 等残留英文并生成 rerun keys。
+   - preview consistency 已把 `text[]` / `unlock[]` 中的 `severity=rerun` 残留英文前移为 `needs_review`，loop merge 后也会对完整 preview 重跑该检查。
+   - 下一步应补全文件级 final reviewer，用于处理 source typo、动态占位异常、短英文专名等需要语义判断的问题。
 
 3. 完整质量评审
    - 当前 entry preview 已有一次 naturalness/meaning reviewer 自动重译。

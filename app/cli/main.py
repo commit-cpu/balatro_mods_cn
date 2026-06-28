@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 
 import typer
 from dotenv import load_dotenv
@@ -14,6 +15,12 @@ from rich.panel import Panel
 from rich.table import Table
 
 from app.config import load_settings
+from app.cli.translation_loop import (
+    audit_has_rerunnable_issues,
+    default_loop_work_dir,
+    loop_round_artifacts,
+    write_loop_manifest,
+)
 from app.db.migrate import migrate as run_migrations
 from app.llm.client import OpenAICompatibleClient
 from app.llm.translator import TranslationReference, Translator
@@ -54,6 +61,7 @@ _CREDIT_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 _STYLED_CARD_TARGET_RE = re.compile(r"(\{[^}]*\})([^{}]*牌)(\{\})")
+_RESIDUAL_ENGLISH_WARNING_PREFIX = "Residual English in "
 
 
 @dataclass(frozen=True)
@@ -195,14 +203,9 @@ def build_style_pack_command(
         max_per_category=max_per_category,
     )
     save_style_pack(pack, output)
-    missing = [
-        key
-        for key, category in sorted(pack.categories.items())
-        if not category.minimum_met
-    ]
+    missing = [key for key, category in sorted(pack.categories.items()) if not category.minimum_met]
     console.print(
-        f"Style pack categories={len(pack.categories)} output={output} "
-        f"below_minimum={len(missing)}"
+        f"Style pack categories={len(pack.categories)} output={output} below_minimum={len(missing)}"
     )
     if missing:
         console.print(f"Below minimum: {', '.join(missing)}")
@@ -218,10 +221,7 @@ def check_terms(
     db_path = Path(settings.sqlite.database_path)
     term_map = build_locked_term_map(db_path, mod_id=mod_id)
     term_info = build_locked_term_info(db_path, mod_id=mod_id)
-    console.print(
-        f"Locked terms: {len(term_map)} "
-        f"(mod_id filter={mod_id or 'none'})"
-    )
+    console.print(f"Locked terms: {len(term_map)} (mod_id filter={mod_id or 'none'})")
 
     total_violations = 0
     flagged_entries = 0
@@ -243,9 +243,7 @@ def check_terms(
                 target=target,
                 term_map=term_map,
                 term_info=term_info,
-                expected_context_types=_entry_expected_context_types(
-                    str(row.get("entry_key", ""))
-                ),
+                expected_context_types=_entry_expected_context_types(str(row.get("entry_key", ""))),
             )
             if violations:
                 flagged_entries += 1
@@ -259,9 +257,7 @@ def check_terms(
                     v.message,
                 )
     console.print(table)
-    console.print(
-        f"Summary: {total_violations} violations across {flagged_entries} entries"
-    )
+    console.print(f"Summary: {total_violations} violations across {flagged_entries} entries")
 
 
 @app.command("audit-entry-output")
@@ -286,8 +282,7 @@ def audit_entry_output(
 
     summary = report["summary"]
     console.print(
-        "Entry output audit: "
-        + " ".join(f"{key}={value}" for key, value in summary.items())
+        "Entry output audit: " + " ".join(f"{key}={value}" for key, value in summary.items())
     )
     _print_audit_items("Failed preview rows", report["failed_rows"], "entry_key")
     _print_audit_items("Needs-review preview rows", report["needs_review_rows"], "entry_key")
@@ -315,18 +310,173 @@ def merge_entry_preview(
     base: Path = typer.Option(..., exists=True, dir_okay=False),
     updates: Path = typer.Option(..., exists=True, dir_okay=False),
     output: Path = typer.Option(...),
+    safe_updates: bool = typer.Option(False),
+    apply_consistency: bool = typer.Option(False),
 ) -> None:
     """Merge updated entry preview rows into a base preview JSONL file."""
     base_rows = _read_preview_rows(base)
     update_rows = _read_preview_rows(updates)
-    merged_rows, replaced, appended = _merge_preview_rows(base_rows, update_rows)
+    merged_rows, replaced, appended, skipped = _merge_preview_rows(
+        base_rows, update_rows, safe_updates=safe_updates
+    )
+    if apply_consistency:
+        _apply_preview_consistency(merged_rows)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as file:
         for row in merged_rows:
             file.write(json.dumps(row, ensure_ascii=False) + "\n")
     console.print(
         f"Merged entry preview: base={len(base_rows)} updates={len(update_rows)} "
-        f"replaced={replaced} appended={appended} output={output}"
+        f"replaced={replaced} appended={appended} skipped={skipped} "
+        f"consistency={1 if apply_consistency else 0} output={output}"
+    )
+
+
+@app.command("translate-entry-loop")
+def translate_entry_loop(
+    repo: Path = typer.Option(..., exists=True, file_okay=False),
+    source: str = typer.Option(...),
+    output: Path = typer.Option(Path("localization/zh_CN.lua")),
+    work_dir: Path | None = typer.Option(None),
+    limit: int = typer.Option(9999, min=1),
+    top_k: int = typer.Option(5, min=1),
+    max_width: int = typer.Option(18, min=4),
+    concurrency: int | None = typer.Option(None, min=1),
+    max_rounds: int = typer.Option(3, min=1),
+    include_needs_review: bool = typer.Option(False),
+    validate_lua: bool = typer.Option(True),
+) -> None:
+    """Run full entry translation, apply, audit, rerun, and merge as a loop."""
+    resolved_work_dir = (work_dir or default_loop_work_dir(repo)).resolve()
+    resolved_work_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = resolved_work_dir / "manifest.json"
+    final_output = output if output.is_absolute() else repo / output
+    rounds = []
+    previous_preview: Path | None = None
+    previous_keys: Path | None = None
+    final_summary: dict[str, object] | None = None
+    stopped_reason = "max_rounds"
+
+    console.print(
+        "Entry translation loop: "
+        f"repo={repo} source={source} output={final_output} "
+        f"work_dir={resolved_work_dir} max_rounds={max_rounds} "
+        f"limit={limit} top_k={top_k} max_width={max_width} "
+        f"concurrency={_llm_concurrency(concurrency)}"
+    )
+
+    for round_index in range(max_rounds):
+        artifacts = loop_round_artifacts(resolved_work_dir, round_index)
+        rounds.append(artifacts)
+        console.print(f"[loop round {round_index + 1}/{max_rounds}]")
+
+        if round_index == 0:
+            translate_entry_preview_mod(
+                repo=repo,
+                source=source,
+                output=artifacts.preview,
+                limit=limit,
+                top_k=top_k,
+                max_width=max_width,
+                concurrency=concurrency,
+                entry_keys_file=None,
+                context_preview=None,
+            )
+        else:
+            if previous_keys is None or previous_preview is None:
+                stopped_reason = "no_rerun_keys"
+                break
+            translate_entry_preview_mod(
+                repo=repo,
+                source=source,
+                output=artifacts.rerun,
+                limit=limit,
+                top_k=top_k,
+                max_width=max_width,
+                concurrency=concurrency,
+                entry_keys_file=previous_keys,
+                context_preview=previous_preview,
+            )
+            merge_entry_preview(
+                base=previous_preview,
+                updates=artifacts.rerun,
+                output=artifacts.preview,
+                safe_updates=True,
+                apply_consistency=True,
+            )
+
+        apply_entry_preview(
+            repo=repo,
+            source=source,
+            input=artifacts.preview,
+            output=artifacts.target,
+            include_needs_review=include_needs_review,
+            table_level=True,
+            validate_lua=validate_lua,
+        )
+        audit_entry_output(
+            repo=repo,
+            source=source,
+            target=artifacts.target,
+            preview=artifacts.preview,
+            json_output=artifacts.audit,
+        )
+
+        report = json.loads(artifacts.audit.read_text(encoding="utf-8"))
+        final_summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        keys = _audit_rerun_keys(report)
+        artifacts.rerun_keys.write_text(
+            "\n".join(keys) + ("\n" if keys else ""),
+            encoding="utf-8",
+        )
+        console.print(
+            f"  loop audit keys={len(keys)} "
+            f"rerunnable={audit_has_rerunnable_issues(report)} "
+            f"rerun_keys={artifacts.rerun_keys}"
+        )
+
+        write_loop_manifest(
+            path=manifest_path,
+            repo=repo,
+            source=source,
+            output=final_output,
+            work_dir=resolved_work_dir,
+            max_rounds=max_rounds,
+            completed_rounds=len(rounds),
+            stopped_reason="running",
+            rounds=rounds,
+            final_audit_summary=final_summary,
+        )
+
+        previous_preview = artifacts.preview
+        previous_keys = artifacts.rerun_keys
+        if not keys:
+            stopped_reason = "no_rerun_keys"
+            break
+
+    if previous_preview is None or not rounds:
+        console.print("Translation loop did not produce a preview.")
+        raise typer.Exit(1)
+
+    last_target = rounds[-1].target
+    final_output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(last_target, final_output)
+    write_loop_manifest(
+        path=manifest_path,
+        repo=repo,
+        source=source,
+        output=final_output,
+        work_dir=resolved_work_dir,
+        max_rounds=max_rounds,
+        completed_rounds=len(rounds),
+        stopped_reason=stopped_reason,
+        rounds=rounds,
+        final_audit_summary=final_summary,
+    )
+    console.print(
+        "Translation loop complete: "
+        f"rounds={len(rounds)} stopped_reason={stopped_reason} "
+        f"output={final_output} manifest={manifest_path}"
     )
 
 
@@ -419,9 +569,7 @@ def apply_entry_preview(
         raise typer.Exit(1)
     instructions.extend(table_instructions)
     patched = LuaPatcher().patch(source_bytes, instructions)
-    diff_ok, diff_msg = _diff_matches_patch_instructions(
-        source_bytes, patched, instructions
-    )
+    diff_ok, diff_msg = _diff_matches_patch_instructions(source_bytes, patched, instructions)
     if not diff_ok:
         console.print(diff_msg)
         raise typer.Exit(1)
@@ -611,10 +759,7 @@ def translate_entry_preview_mod(
             queries=_entry_rag_queries(entry, body_text),
             top_k=top_k,
         )
-        console.print(
-            f"  RAG refs={len(dense_refs)} "
-            f"best_score={_best_score(dense_refs)}"
-        )
+        console.print(f"  RAG refs={len(dense_refs)} best_score={_best_score(dense_refs)}")
         glossary_refs = retrieve_glossary_references(
             db_path=db_path,
             query_text=_entry_glossary_query(entry, body_text),
@@ -661,9 +806,7 @@ def translate_entry_preview_mod(
         max_workers=llm_concurrency,
         seed_names=seeded_names,
     )
-    pretranslated_names = _canonicalize_pretranslated_names(
-        work_items, pretranslated_names
-    )
+    pretranslated_names = _canonicalize_pretranslated_names(work_items, pretranslated_names)
     name_context = _join_prompt_contexts(
         _render_mod_name_glossary(work_items, pretranslated_names),
         _render_preview_translation_context(context_rows),
@@ -760,7 +903,9 @@ def _read_entry_key_filter(path: Path | None) -> set[str] | None:
 def _merge_preview_rows(
     base_rows: list[dict[str, object]],
     update_rows: list[dict[str, object]],
-) -> tuple[list[dict[str, object]], int, int]:
+    *,
+    safe_updates: bool = False,
+) -> tuple[list[dict[str, object]], int, int, int]:
     updates_by_key: dict[str, dict[str, object]] = {}
     update_order: list[str] = []
     for row in update_rows:
@@ -772,14 +917,20 @@ def _merge_preview_rows(
         updates_by_key[key] = row
 
     replaced = 0
+    skipped = 0
     seen: set[str] = set()
     merged: list[dict[str, object]] = []
     for row in base_rows:
         key = row.get("entry_key")
         if isinstance(key, str) and key in updates_by_key:
-            merged.append(updates_by_key[key])
+            update_row = updates_by_key[key]
+            if safe_updates and not _is_safe_preview_update(update_row):
+                merged.append(row)
+                skipped += 1
+            else:
+                merged.append(update_row)
+                replaced += 1
             seen.add(key)
-            replaced += 1
         else:
             merged.append(row)
 
@@ -787,9 +938,21 @@ def _merge_preview_rows(
     for key in update_order:
         if key in seen:
             continue
-        merged.append(updates_by_key[key])
+        update_row = updates_by_key[key]
+        if safe_updates and not _is_safe_preview_update(update_row):
+            skipped += 1
+            continue
+        merged.append(update_row)
         appended += 1
-    return merged, replaced, appended
+    return merged, replaced, appended, skipped
+
+
+def _is_safe_preview_update(row: dict[str, object]) -> bool:
+    if row.get("ok") is not True:
+        return False
+    if row.get("needs_review") is True:
+        return False
+    return _row_apply_mode(row) != "blocked"
 
 
 def _audit_rerun_keys(report: dict[str, object]) -> list[str]:
@@ -837,7 +1000,9 @@ def _entry_key_from_unit_key(value: object) -> str | None:
     if not isinstance(value, str) or not value:
         return None
     if value.startswith("descriptions."):
-        match = re.match(r"^(descriptions\.[^.]+\.[^.]+)(?:\.(?:name|text|unlock)(?:\[\d+\])?)?$", value)
+        match = re.match(
+            r"^(descriptions\.[^.]+\.[^.]+)(?:\.(?:name|text|unlock)(?:\[\d+\])?)?$", value
+        )
         if match:
             return match.group(1)
     misc_match = re.match(r"^(misc\.[^.]+\.[^\[]+)(?:\[\d+\])?$", value)
@@ -921,11 +1086,7 @@ def _residual_english_items(units: list) -> list[dict[str, str]]:
 
 def _residual_english_severity_for_unit(unit_key: str, text: str) -> str | None:
     severity = _residual_english_severity(text)
-    if (
-        severity == "rerun"
-        and unit_key.endswith(".name")
-        and _looks_like_acronym_text(text)
-    ):
+    if severity == "rerun" and unit_key.endswith(".name") and _looks_like_acronym_text(text):
         return "review"
     return severity
 
@@ -993,8 +1154,12 @@ def _is_gameplay_english_word(word: str) -> bool:
         "gains",
         "hand",
         "held",
+        "imaginary",
         "level",
+        "lvl",
         "mult",
+        "consumable",
+        "consumble",
         "played",
         "rank",
         "round",
@@ -1129,7 +1294,7 @@ def _diff_matches_patch_instructions(
         unchanged_len = instruction.byte_start - orig_pos
         if unchanged_len < 0:
             return False, f"overlapping patch instruction: {instruction.unit_key}"
-        original_chunk = original[orig_pos:instruction.byte_start]
+        original_chunk = original[orig_pos : instruction.byte_start]
         patched_chunk = patched[patched_pos : patched_pos + unchanged_len]
         if original_chunk != patched_chunk:
             return False, f"unexpected byte change before {instruction.unit_key}"
@@ -1179,8 +1344,7 @@ def _table_level_can_apply(row: dict[str, object]) -> bool:
     warnings = row.get("patch_warnings") or []
     if isinstance(warnings, list) and warnings:
         return all(
-            isinstance(warning, str)
-            and _is_table_level_apply_warning(warning)
+            isinstance(warning, str) and _is_table_level_apply_warning(warning)
             for warning in warnings
         )
     return _row_has_line_count_delta(row)
@@ -1255,9 +1419,7 @@ def _extend_indexed_translations(
         errors.append(f"invalid {field} translations")
         return
     if len(unit_keys) != len(values):
-        errors.append(
-            f"{field} line count mismatch: units={len(unit_keys)}, values={len(values)}"
-        )
+        errors.append(f"{field} line count mismatch: units={len(unit_keys)}, values={len(values)}")
         return
     for key, value in zip(unit_keys, values, strict=True):
         if not isinstance(key, str) or not isinstance(value, str):
@@ -1427,9 +1589,7 @@ def _preview_review_log(row: dict[str, object]) -> str:
     retry_token_errors = 0
     if isinstance(retry_history, list):
         retry_token_errors = sum(
-            1
-            for item in retry_history
-            if isinstance(item, dict) and item.get("retry_token_errors")
+            1 for item in retry_history if isinstance(item, dict) and item.get("retry_token_errors")
         )
     return (
         f"term_violations={term_violations} "
@@ -1479,10 +1639,7 @@ def _update_preview_stats(stats: dict[str, int], row: dict[str, object]) -> None
     retry_history = review.get("retry_history")
     if isinstance(retry_history, list) and retry_history:
         stats["quality_retry_entries"] += 1
-        if any(
-            isinstance(item, dict) and item.get("retry_token_errors")
-            for item in retry_history
-        ):
+        if any(isinstance(item, dict) and item.get("retry_token_errors") for item in retry_history):
             stats["retry_token_error_entries"] += 1
 
 
@@ -1739,9 +1896,7 @@ def _name_prepass_allows_reference(
     ref_words = ref_source.split()
     if len(source_words) > 1 and len(ref_words) == 1:
         ref_mod = getattr(ref, "mod_id", "")
-        if ref_mod != "balatro_origin" and _source_name_referenced(
-            source_name, ref_source
-        ):
+        if ref_mod != "balatro_origin" and _source_name_referenced(source_name, ref_source):
             return False
     return True
 
@@ -1832,11 +1987,7 @@ def _render_mod_name_glossary(
         "Use these name translations consistently across this mod.",
     ]
     for item in work_items:
-        source_name = (
-            item.entry.name.source_text
-            if item.entry.name is not None
-            else None
-        )
+        source_name = item.entry.name.source_text if item.entry.name is not None else None
         target_name = pretranslated_names.get(item.entry.entry_key)
         if not isinstance(source_name, str) or not isinstance(target_name, str):
             continue
@@ -1994,9 +2145,7 @@ def _join_prompt_contexts(*contexts: str) -> str:
 
 def _render_preview_translation_context(rows: list[dict[str, object]]) -> str:
     accepted_rows = [
-        row
-        for row in rows
-        if row.get("ok") is True and row.get("needs_review") is not True
+        row for row in rows if row.get("ok") is True and row.get("needs_review") is not True
     ]
     if not accepted_rows:
         return ""
@@ -2196,9 +2345,8 @@ def _entry_name_only_preview_row(
 
 
 def _apply_preview_consistency(rows: list[dict[str, object]]) -> None:
+    _canonicalize_duplicate_source_bodies(rows)
     name_terms = _preview_name_terms(rows)
-    if not name_terms:
-        return
 
     for row in rows:
         if row.get("ok") is not True:
@@ -2214,24 +2362,172 @@ def _apply_preview_consistency(rows: list[dict[str, object]]) -> None:
         if not source_text:
             continue
 
-        for source_name, target_name in name_terms:
-            if f"{source_name} Card" not in source_text:
+        if name_terms:
+            for source_name, target_name in name_terms:
+                if f"{source_name} Card" not in source_text:
+                    continue
+                expected = target_name if target_name.endswith("牌") else f"{target_name}牌"
+                if _row_contains_target(row, expected):
+                    continue
+                if _replace_row_styled_card_target(row, expected):
+                    _refresh_row_apply_metadata(row)
+                    continue
+                _add_consistency_warning(
+                    row,
+                    f"{source_name} Card should use mod-local name translation {expected!r}",
+                )
+
+        _apply_residual_english_review(row)
+        review = row.get("review")
+        if isinstance(review, dict):
+            row["needs_review"] = (row.get("ok") is not True) or _review_needs_attention(review)
+
+
+def _canonicalize_duplicate_source_bodies(rows: list[dict[str, object]]) -> None:
+    groups: dict[tuple[str, tuple[str, ...], tuple[str, ...]], list[dict[str, object]]] = {}
+    for row in rows:
+        key = _duplicate_source_body_key(row)
+        if key is None:
+            continue
+        groups.setdefault(key, []).append(row)
+
+    for group_rows in groups.values():
+        if len(group_rows) < 2:
+            continue
+        scored = [
+            (_duplicate_translation_score(row), index, row)
+            for index, row in enumerate(group_rows)
+            if _row_can_seed_duplicate_translation(row)
+        ]
+        if not scored:
+            continue
+        best_score, _, best_row = min(scored, key=lambda item: (item[0], item[1]))
+        if best_score[0] > 0:
+            continue
+        best_text = list(_source_field_strings(best_row.get("text")))
+        best_unlock = list(_source_field_strings(best_row.get("unlock")))
+        for row in group_rows:
+            if row is best_row or row.get("ok") is not True:
                 continue
-            expected = target_name if target_name.endswith("牌") else f"{target_name}牌"
-            if _row_contains_target(row, expected):
+            if _duplicate_translation_score(row) <= best_score:
                 continue
-            if _replace_row_styled_card_target(row, expected):
+            row["text"] = list(best_text)
+            row["unlock"] = list(best_unlock)
+            _refresh_row_apply_metadata(row)
+
+
+def _duplicate_source_body_key(
+    row: dict[str, object],
+) -> tuple[str, tuple[str, ...], tuple[str, ...]] | None:
+    entry_key = row.get("entry_key")
+    source = row.get("source")
+    if not isinstance(entry_key, str) or not isinstance(source, dict):
+        return None
+    match = re.match(r"^(descriptions\.[^.]+)\.", entry_key)
+    if not match:
+        return None
+    source_text = tuple(_source_field_strings(source.get("text")))
+    source_unlock = tuple(_source_field_strings(source.get("unlock")))
+    if not source_text and not source_unlock:
+        return None
+    return match.group(1), source_text, source_unlock
+
+
+def _row_can_seed_duplicate_translation(row: dict[str, object]) -> bool:
+    if row.get("ok") is not True:
+        return False
+    if row.get("needs_review") is True:
+        return False
+    if row.get("token_errors"):
+        return False
+    review = row.get("review")
+    if isinstance(review, dict) and _review_needs_attention(review):
+        return False
+    if _row_apply_mode(row) == "blocked":
+        return False
+    return isinstance(row.get("text"), list) and isinstance(row.get("unlock"), list)
+
+
+def _duplicate_translation_score(row: dict[str, object]) -> tuple[int, int, int]:
+    values = [
+        item
+        for field in ("text", "unlock")
+        for item in _source_field_strings(row.get(field))
+    ]
+    rerun_residuals = 0
+    residuals = 0
+    for value in values:
+        severity = _residual_english_severity(value)
+        if severity is None:
+            continue
+        residuals += 1
+        if severity == "rerun":
+            rerun_residuals += 1
+    review = row.get("review")
+    review_warnings = 1 if isinstance(review, dict) and _review_needs_attention(review) else 0
+    return rerun_residuals, residuals, review_warnings
+
+
+def _refresh_row_apply_metadata(row: dict[str, object]) -> None:
+    if row.get("ok") is not True:
+        row["patchable"] = False
+        row["patch_warnings"] = ["entry translation failed"]
+        row["apply_warnings"] = ["entry translation failed"]
+        row["apply_mode"] = "blocked"
+        return
+
+    warnings: list[str] = []
+    target_units = row.get("target_units")
+    if isinstance(target_units, dict):
+        name_units = target_units.get("name")
+        if name_units is not None and not isinstance(row.get("name"), str):
+            warnings.append("missing name translation")
+        source_text_count = _list_len(target_units.get("text"))
+        target_text_count = _list_len(row.get("text"))
+        if source_text_count != target_text_count:
+            warnings.append(
+                f"text line count mismatch: source={source_text_count}, target={target_text_count}"
+            )
+        source_unlock_count = _list_len(target_units.get("unlock"))
+        target_unlock_count = _list_len(row.get("unlock"))
+        if source_unlock_count != target_unlock_count:
+            warnings.append(
+                f"unlock line count mismatch: source={source_unlock_count}, target={target_unlock_count}"
+            )
+    patchable = not warnings
+    row["patchable"] = patchable
+    row["patch_warnings"] = warnings
+    row["apply_warnings"] = warnings
+    row["apply_mode"] = _entry_apply_mode(patchable, warnings)
+
+
+def _apply_residual_english_review(row: dict[str, object]) -> None:
+    _remove_generated_residual_warnings(row)
+    for field in ("text", "unlock"):
+        for index, item in enumerate(_source_field_strings(row.get(field))):
+            if _residual_english_severity(item) != "rerun":
                 continue
             _add_consistency_warning(
                 row,
-                f"{source_name} Card should use mod-local name translation {expected!r}",
+                f"{_RESIDUAL_ENGLISH_WARNING_PREFIX}{field}[{index}]: {item}",
             )
 
-        review = row.get("review")
-        if isinstance(review, dict):
-            row["needs_review"] = (row.get("ok") is not True) or _review_needs_attention(
-                review
-            )
+
+def _remove_generated_residual_warnings(row: dict[str, object]) -> None:
+    review = row.get("review")
+    if not isinstance(review, dict):
+        return
+    warnings = review.get("consistency_warnings")
+    if not isinstance(warnings, list):
+        return
+    review["consistency_warnings"] = [
+        warning
+        for warning in warnings
+        if not (
+            isinstance(warning, str)
+            and warning.startswith(_RESIDUAL_ENGLISH_WARNING_PREFIX)
+        )
+    ]
 
 
 def _preview_name_terms(rows: list[dict[str, object]]) -> list[tuple[str, str]]:
@@ -2372,9 +2668,7 @@ def _maybe_retry_entry_translation(
     retry_history.append(
         {
             "reason": "quality_review",
-            "naturalness_warnings": list(
-                getattr(quality_review, "naturalness_warnings", [])
-            ),
+            "naturalness_warnings": list(getattr(quality_review, "naturalness_warnings", [])),
             "meaning_warnings": list(getattr(quality_review, "meaning_warnings", [])),
             "rewrite_hint": getattr(quality_review, "rewrite_hint", ""),
         }
@@ -2426,8 +2720,7 @@ def _token_error_feedback(token_errors: list[str]) -> str:
     return (
         "Fix the translation so its style/control tokens exactly match the source. "
         "Do not add, remove, duplicate, or reorder Balatro tokens such as {C:...}, "
-        "{}, and #1#.\nToken errors: "
-        + "; ".join(token_errors)
+        "{}, and #1#.\nToken errors: " + "; ".join(token_errors)
     )
 
 
@@ -2569,9 +2862,7 @@ def _entry_patchability(
     if entry.name is not None and name is None:
         warnings.append("missing name translation")
     if len(text) != len(entry.text):
-        warnings.append(
-            f"text line count mismatch: source={len(entry.text)}, target={len(text)}"
-        )
+        warnings.append(f"text line count mismatch: source={len(entry.text)}, target={len(text)}")
     if len(unlock) != len(entry.unlock):
         warnings.append(
             f"unlock line count mismatch: source={len(entry.unlock)}, target={len(unlock)}"

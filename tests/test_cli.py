@@ -1,5 +1,6 @@
 from typer.testing import CliRunner
 import json
+from pathlib import Path
 import threading
 import time
 
@@ -29,6 +30,7 @@ def test_cli_has_rag_commands() -> None:
     assert "audit-entry-output" in result.output
     assert "audit-rerun-keys" in result.output
     assert "merge-entry-preview" in result.output
+    assert "translate-entry-loop" in result.output
     assert "rag-preview-mod" in result.output
     assert "translate-preview-mod" in result.output
     assert "translate-entry-preview-mod" in result.output
@@ -135,6 +137,138 @@ def test_apply_preview_consistency_uses_mod_name_for_styled_card_terms() -> None
     assert rows[1]["text"] == ["将卡牌转化为{C:attention}彩色玻璃牌{}。"]
     assert rows[1]["needs_review"] is False
     assert rows[1]["review"]["consistency_warnings"] == []
+
+
+def test_apply_preview_consistency_reuses_best_translation_for_duplicate_source_body() -> None:
+    rows = [
+        {
+            "entry_key": "descriptions.Familiar_Planets.c_one",
+            "ok": True,
+            "name": "一",
+            "text": ["(等级：#1#+i) 虚数升级", "{C:attention}#4# {C:red}X#2#{}倍率"],
+            "unlock": [],
+            "target_units": {
+                "name": "descriptions.Familiar_Planets.c_one.name",
+                "text": [
+                    "descriptions.Familiar_Planets.c_one.text[0]",
+                    "descriptions.Familiar_Planets.c_one.text[1]",
+                    "descriptions.Familiar_Planets.c_one.text[2]",
+                    "descriptions.Familiar_Planets.c_one.text[3]",
+                ],
+                "unlock": [],
+            },
+            "patchable": False,
+            "patch_warnings": ["text line count mismatch: source=4, target=2"],
+            "apply_mode": "table",
+            "source": {
+                "name": "One",
+                "text": [
+                    "(lvl:#1#+i) Imaginary Level Up",
+                    "{C:attention}#4#",
+                    "{C:red}X#2#{} Mult and",
+                    "{C:blue}X#3#{} chips",
+                ],
+                "unlock": [],
+            },
+            "review": {
+                "term_violations": [],
+                "consistency_warnings": [],
+                "naturalness_warnings": [],
+                "meaning_warnings": [],
+                "rewrite_hint": "",
+                "retry_history": [],
+            },
+            "needs_review": False,
+        },
+        {
+            "entry_key": "descriptions.Familiar_Planets.c_two",
+            "ok": True,
+            "name": "二",
+            "text": ["(lvl:#1#+i) 虚数升级", "Imaginary 手牌"],
+            "unlock": [],
+            "target_units": {
+                "name": "descriptions.Familiar_Planets.c_two.name",
+                "text": [
+                    "descriptions.Familiar_Planets.c_two.text[0]",
+                    "descriptions.Familiar_Planets.c_two.text[1]",
+                    "descriptions.Familiar_Planets.c_two.text[2]",
+                    "descriptions.Familiar_Planets.c_two.text[3]",
+                ],
+                "unlock": [],
+            },
+            "patchable": False,
+            "patch_warnings": ["text line count mismatch: source=4, target=2"],
+            "apply_mode": "table",
+            "source": {
+                "name": "Two",
+                "text": [
+                    "(lvl:#1#+i) Imaginary Level Up",
+                    "{C:attention}#4#",
+                    "{C:red}X#2#{} Mult and",
+                    "{C:blue}X#3#{} chips",
+                ],
+                "unlock": [],
+            },
+            "review": {
+                "term_violations": [],
+                "consistency_warnings": [],
+                "naturalness_warnings": [],
+                "meaning_warnings": [],
+                "rewrite_hint": "",
+                "retry_history": [],
+            },
+            "needs_review": False,
+        },
+    ]
+
+    _apply_preview_consistency(rows)
+
+    assert rows[1]["text"] == rows[0]["text"]
+    assert rows[1]["needs_review"] is False
+    assert rows[1]["apply_mode"] == "table"
+    assert rows[1]["patch_warnings"] == ["text line count mismatch: source=4, target=2"]
+
+
+def test_apply_preview_consistency_flags_rerunnable_residual_english() -> None:
+    row = {
+        "entry_key": "descriptions.Familiar_Tarots.c_verdict",
+        "ok": True,
+        "name": "裁决",
+        "text": ["生成一张随机的", "{C:attention}Consumble{}牌"],
+        "unlock": [],
+        "target_units": {
+            "name": "descriptions.Familiar_Tarots.c_verdict.name",
+            "text": [
+                "descriptions.Familiar_Tarots.c_verdict.text[0]",
+                "descriptions.Familiar_Tarots.c_verdict.text[1]",
+            ],
+            "unlock": [],
+        },
+        "patchable": True,
+        "patch_warnings": [],
+        "apply_mode": "unit",
+        "source": {
+            "name": "Verdict",
+            "text": ["Creates a random", "{C:attention}Consumble{} card"],
+            "unlock": [],
+        },
+        "review": {
+            "term_violations": [],
+            "consistency_warnings": [],
+            "naturalness_warnings": [],
+            "meaning_warnings": [],
+            "rewrite_hint": "",
+            "retry_history": [],
+        },
+        "needs_review": False,
+    }
+
+    _apply_preview_consistency([row])
+
+    assert row["needs_review"] is True
+    assert row["review"]["consistency_warnings"] == [
+        "Residual English in text[1]: {C:attention}Consumble{}牌"
+    ]
 
 
 def test_name_prepass_rejects_unrelated_exact_context_reference() -> None:
@@ -1470,15 +1604,14 @@ def test_translate_entry_preview_mod_writes_grouped_jsonl(monkeypatch, tmp_path)
     monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
     monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
     monkeypatch.setattr("app.cli.main.load_style_pack", lambda path=None: object())
+
     class FakeStyleExample:
         unit_key = "style.key"
         source_mod_id = ""
 
     monkeypatch.setattr(
         "app.cli.main.select_style_examples",
-        lambda pack, *, entry_key, query_text, limit, allow_fallback=True: [
-            FakeStyleExample()
-        ],
+        lambda pack, *, entry_key, query_text, limit, allow_fallback=True: [FakeStyleExample()],
     )
     monkeypatch.setattr("app.cli.main.select_tm_style_examples", lambda *args, **kwargs: [])
     monkeypatch.setattr(
@@ -1828,8 +1961,7 @@ def test_translate_entry_preview_retries_after_quality_review(
             class Result:
                 name = "Nitro"
                 text = [
-                    "{C:attention}打出{}时{C:attention}+2{}手牌上限，"
-                    "回合结束时{C:attention}重置{}"
+                    "{C:attention}打出{}时{C:attention}+2{}手牌上限，回合结束时{C:attention}重置{}"
                 ]
                 unlock = []
                 token_errors = []
@@ -1863,8 +1995,7 @@ def test_translate_entry_preview_retries_after_quality_review(
     rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
     row = rows[0]
     assert row["text"] == [
-        "{C:attention}打出{}时{C:attention}+2{}手牌上限，"
-        "回合结束时{C:attention}重置{}"
+        "{C:attention}打出{}时{C:attention}+2{}手牌上限，回合结束时{C:attention}重置{}"
     ]
     assert row["needs_review"] is False
     assert row["review"]["naturalness_warnings"] == []
@@ -1968,9 +2099,7 @@ def test_translate_entry_preview_keeps_original_when_quality_retry_breaks_tokens
     assert row["text"] == ["每回合出牌次数{C:blue}+1{}"]
     assert row["needs_review"] is True
     assert row["review"]["naturalness_warnings"] == ["语序需要调整"]
-    assert row["review"]["retry_history"][0]["retry_token_errors"] == [
-        "text: Token count mismatch"
-    ]
+    assert row["review"]["retry_history"][0]["retry_token_errors"] == ["text: Token count mismatch"]
 
 
 def test_translate_entry_preview_retries_initial_token_errors(
@@ -2339,9 +2468,7 @@ def test_translate_entry_preview_marks_line_count_mismatch_as_table_apply_mode(
     assert rows[0]["needs_review"] is False
     assert rows[0]["patchable"] is False
     assert rows[0]["apply_mode"] == "table"
-    assert rows[0]["apply_warnings"] == [
-        "text line count mismatch: source=1, target=2"
-    ]
+    assert rows[0]["apply_warnings"] == ["text line count mismatch: source=1, target=2"]
     assert rows[0]["patch_warnings"] == ["text line count mismatch: source=1, target=2"]
 
 
@@ -2876,9 +3003,7 @@ def test_audit_entry_output_classifies_residual_english_severity(tmp_path) -> No
     assert by_key["descriptions.Joker.j_mixed.text[0]"]["severity"] == "rerun"
     assert by_key["descriptions.Joker.j_acronym.name"]["severity"] == "review"
     assert by_key["descriptions.Joker.j_rna.name"]["severity"] == "review"
-    untranslated = {
-        item["unit_key"]: item for item in payload["untranslated_units"]
-    }
+    untranslated = {item["unit_key"]: item for item in payload["untranslated_units"]}
     assert untranslated["descriptions.Joker.j_english.name"]["severity"] == "rerun"
     assert untranslated["descriptions.Joker.j_rna.name"]["severity"] == "review"
 
@@ -2988,6 +3113,380 @@ def test_merge_entry_preview_replaces_rows_by_entry_key(tmp_path) -> None:
     ]
     assert "replaced=1" in result.output
     assert "appended=1" in result.output
+
+
+def test_merge_entry_preview_safe_updates_preserve_base_on_failed_update(
+    tmp_path,
+) -> None:
+    base = tmp_path / "base.jsonl"
+    updates = tmp_path / "updates.jsonl"
+    output = tmp_path / "merged.jsonl"
+    base.write_text(
+        json.dumps(
+            {
+                "entry_key": "descriptions.Enhanced.m_div",
+                "ok": True,
+                "needs_review": False,
+                "apply_mode": "table",
+                "text": ["{X:mult,C:white}X#1#{}倍率"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    updates.write_text(
+        json.dumps(
+            {
+                "entry_key": "descriptions.Enhanced.m_div",
+                "ok": False,
+                "needs_review": True,
+                "apply_mode": "blocked",
+                "token_errors": ["text: Token count mismatch"],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "merge-entry-preview",
+            "--base",
+            str(base),
+            "--updates",
+            str(updates),
+            "--output",
+            str(output),
+            "--safe-updates",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert rows == [
+        {
+            "entry_key": "descriptions.Enhanced.m_div",
+            "ok": True,
+            "needs_review": False,
+            "apply_mode": "table",
+            "text": ["{X:mult,C:white}X#1#{}倍率"],
+        }
+    ]
+    assert "replaced=0" in result.output
+    assert "skipped=1" in result.output
+
+
+def test_merge_entry_preview_can_apply_consistency_after_merge(tmp_path) -> None:
+    base = tmp_path / "base.jsonl"
+    updates = tmp_path / "updates.jsonl"
+    output = tmp_path / "merged.jsonl"
+    source_body = {
+        "text": [
+            "(lvl:#1#+i) Imaginary Level Up",
+            "{C:attention}#4#",
+            "{C:red}X#2#{} Mult and",
+            "{C:blue}X#3#{} chips",
+        ],
+        "unlock": [],
+    }
+    base_rows = [
+        {
+            "entry_key": "descriptions.Familiar_Planets.c_good",
+            "ok": True,
+            "name": "好",
+            "text": ["(等级：#1#+i) 虚数升级", "{C:attention}#4# {C:red}X#2#{}倍率"],
+            "unlock": [],
+            "target_units": {
+                "name": "descriptions.Familiar_Planets.c_good.name",
+                "text": [
+                    "descriptions.Familiar_Planets.c_good.text[0]",
+                    "descriptions.Familiar_Planets.c_good.text[1]",
+                    "descriptions.Familiar_Planets.c_good.text[2]",
+                    "descriptions.Familiar_Planets.c_good.text[3]",
+                ],
+                "unlock": [],
+            },
+            "patchable": False,
+            "patch_warnings": ["text line count mismatch: source=4, target=2"],
+            "apply_mode": "table",
+            "source": {"name": "Good", **source_body},
+            "review": {
+                "term_violations": [],
+                "consistency_warnings": [],
+                "naturalness_warnings": [],
+                "meaning_warnings": [],
+                "rewrite_hint": "",
+                "retry_history": [],
+            },
+            "needs_review": False,
+        },
+        {
+            "entry_key": "descriptions.Familiar_Planets.c_bad",
+            "ok": True,
+            "name": "坏",
+            "text": ["(lvl:#1#+i) 虚数升级", "Imaginary 手牌"],
+            "unlock": [],
+            "target_units": {
+                "name": "descriptions.Familiar_Planets.c_bad.name",
+                "text": [
+                    "descriptions.Familiar_Planets.c_bad.text[0]",
+                    "descriptions.Familiar_Planets.c_bad.text[1]",
+                    "descriptions.Familiar_Planets.c_bad.text[2]",
+                    "descriptions.Familiar_Planets.c_bad.text[3]",
+                ],
+                "unlock": [],
+            },
+            "patchable": False,
+            "patch_warnings": ["text line count mismatch: source=4, target=2"],
+            "apply_mode": "table",
+            "source": {"name": "Bad", **source_body},
+            "review": {
+                "term_violations": [],
+                "consistency_warnings": [],
+                "naturalness_warnings": [],
+                "meaning_warnings": [],
+                "rewrite_hint": "",
+                "retry_history": [],
+            },
+            "needs_review": False,
+        },
+    ]
+    base.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in base_rows) + "\n",
+        encoding="utf-8",
+    )
+    updates.write_text("", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "merge-entry-preview",
+            "--base",
+            str(base),
+            "--updates",
+            str(updates),
+            "--output",
+            str(output),
+            "--apply-consistency",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert rows[1]["text"] == rows[0]["text"]
+    assert rows[1]["needs_review"] is False
+    assert "consistency=1" in result.output
+
+
+def test_translate_entry_loop_runs_full_then_rerun_until_clean(monkeypatch, tmp_path) -> None:
+    repo = tmp_path / "Familiar"
+    source = repo / "localization" / "en-us.lua"
+    source.parent.mkdir(parents=True)
+    source.write_text("return {}\n", encoding="utf-8")
+    work_dir = tmp_path / "loop"
+    output = Path("localization/zh_CN.lua")
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_translate_entry_preview_mod(**kwargs):
+        calls.append(("translate", kwargs))
+        out = kwargs["output"]
+        assert isinstance(out, Path)
+        if kwargs.get("entry_keys_file") is None:
+            rows = [{"entry_key": "descriptions.Joker.j_one", "ok": True}]
+        else:
+            rows = [{"entry_key": "descriptions.Joker.j_one", "ok": True, "name": "一"}]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+            encoding="utf-8",
+        )
+
+    def fake_apply_entry_preview(**kwargs):
+        calls.append(("apply", kwargs))
+        out = kwargs["output"]
+        assert isinstance(out, Path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(f"-- generated from {kwargs['input'].name}\n", encoding="utf-8")
+
+    def fake_audit_entry_output(**kwargs):
+        calls.append(("audit", kwargs))
+        json_output = kwargs["json_output"]
+        assert isinstance(json_output, Path)
+        if kwargs["target"].name == "round_00_zh_CN.lua":
+            report = {
+                "summary": {"needs_review": 1, "residual_english": 0},
+                "failed_rows": [],
+                "needs_review_rows": [
+                    {"entry_key": "descriptions.Joker.j_one", "apply_mode": "table"}
+                ],
+                "residual_english": [],
+                "untranslated_units": [],
+                "label_name_mismatches": [],
+                "name_inconsistencies": [],
+            }
+        else:
+            report = {
+                "summary": {"needs_review": 0, "residual_english": 0},
+                "failed_rows": [],
+                "needs_review_rows": [],
+                "residual_english": [],
+                "untranslated_units": [],
+                "label_name_mismatches": [],
+                "name_inconsistencies": [],
+            }
+        json_output.parent.mkdir(parents=True, exist_ok=True)
+        json_output.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+
+    def fake_merge_entry_preview(**kwargs):
+        calls.append(("merge", kwargs))
+        assert kwargs["safe_updates"] is True
+        assert kwargs["apply_consistency"] is True
+        output_path = kwargs["output"]
+        assert isinstance(output_path, Path)
+        output_path.write_text(kwargs["updates"].read_text(encoding="utf-8"), encoding="utf-8")
+
+    monkeypatch.setattr(
+        "app.cli.main.translate_entry_preview_mod", fake_translate_entry_preview_mod
+    )
+    monkeypatch.setattr("app.cli.main.apply_entry_preview", fake_apply_entry_preview)
+    monkeypatch.setattr("app.cli.main.audit_entry_output", fake_audit_entry_output)
+    monkeypatch.setattr("app.cli.main.merge_entry_preview", fake_merge_entry_preview)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-loop",
+            "--repo",
+            str(repo),
+            "--source",
+            "localization/en-us.lua",
+            "--output",
+            str(output),
+            "--work-dir",
+            str(work_dir),
+            "--limit",
+            "9999",
+            "--top-k",
+            "5",
+            "--max-width",
+            "18",
+            "--concurrency",
+            "4",
+            "--max-rounds",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [name for name, _ in calls] == [
+        "translate",
+        "apply",
+        "audit",
+        "translate",
+        "merge",
+        "apply",
+        "audit",
+    ]
+    assert (repo / output).read_text(encoding="utf-8") == (
+        "-- generated from round_01_preview.jsonl\n"
+    )
+    manifest = json.loads((work_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["completed_rounds"] == 2
+    assert manifest["stopped_reason"] == "no_rerun_keys"
+    assert manifest["final_audit_summary"] == {
+        "needs_review": 0,
+        "residual_english": 0,
+    }
+    assert manifest["rounds"][0]["preview"] == str(work_dir / "round_00_preview.jsonl")
+    assert manifest["rounds"][1]["rerun"] == str(work_dir / "round_01_rerun.jsonl")
+    assert (work_dir / "round_00_rerun_keys.txt").read_text(encoding="utf-8").splitlines() == [
+        "descriptions.Joker.j_one"
+    ]
+    assert "Translation loop complete" in result.output
+    assert "stopped_reason=no_rerun_keys" in result.output
+
+
+def test_translate_entry_loop_resolves_relative_work_dir_before_apply(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    repo = Path("Familiar")
+    source = repo / "localization" / "en-us.lua"
+    source.parent.mkdir(parents=True)
+    source.write_text("return {}\n", encoding="utf-8")
+    calls: list[tuple[str, Path]] = []
+
+    def fake_translate_entry_preview_mod(**kwargs):
+        out = kwargs["output"]
+        assert isinstance(out, Path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps({"entry_key": "descriptions.Joker.j_one", "ok": True}) + "\n",
+            encoding="utf-8",
+        )
+
+    def fake_apply_entry_preview(**kwargs):
+        out = kwargs["output"]
+        assert isinstance(out, Path)
+        calls.append(("apply_output", out))
+        # Match apply-entry-preview behavior: relative output is resolved inside repo.
+        actual_output = out if out.is_absolute() else kwargs["repo"] / out
+        actual_output.parent.mkdir(parents=True, exist_ok=True)
+        actual_output.write_text("-- generated\n", encoding="utf-8")
+
+    def fake_audit_entry_output(**kwargs):
+        json_output = kwargs["json_output"]
+        assert isinstance(json_output, Path)
+        json_output.parent.mkdir(parents=True, exist_ok=True)
+        json_output.write_text(
+            json.dumps(
+                {
+                    "summary": {"needs_review": 0},
+                    "failed_rows": [],
+                    "needs_review_rows": [],
+                    "residual_english": [],
+                    "untranslated_units": [],
+                    "label_name_mismatches": [],
+                    "name_inconsistencies": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        "app.cli.main.translate_entry_preview_mod", fake_translate_entry_preview_mod
+    )
+    monkeypatch.setattr("app.cli.main.apply_entry_preview", fake_apply_entry_preview)
+    monkeypatch.setattr("app.cli.main.audit_entry_output", fake_audit_entry_output)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-loop",
+            "--repo",
+            str(repo),
+            "--source",
+            "localization/en-us.lua",
+            "--output",
+            "localization/zh_CN_loop.lua",
+            "--work-dir",
+            "relative_loop",
+            "--max-rounds",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        ("apply_output", tmp_path / "relative_loop" / "round_00_zh_CN.lua")
+    ]
+    assert (repo / "localization" / "zh_CN_loop.lua").read_text(
+        encoding="utf-8"
+    ) == "-- generated\n"
 
 
 def test_llm_config_prefers_environment(monkeypatch) -> None:

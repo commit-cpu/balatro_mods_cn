@@ -1,6 +1,6 @@
 # 翻译质量与模组级上下文策略
 
-更新日期：2026-06-27
+更新日期：2026-06-28
 
 本文记录 Fortlatro / Familiar 预览暴露出的质量问题、连续对话上下文方案的可行性分析，以及下一阶段生成 `zh_CN.lua` 前推荐采用的架构。
 
@@ -389,6 +389,8 @@ LuaJIT 编译校验
 
 ### Phase 3：模组级上下文闭环
 
+- `translate-entry-loop` 已提供命令级闭环：全量 preview、apply、audit、rerun keys、局部 rerun、安全 merge、完整 preview 一致性收敛、再次 apply/audit，并把每轮产物写入 work-dir/manifest，方便人工验收和后续分析。
+- preview consistency 已能复用同类别内重复 source body 的最佳译文，并把 `text[]` / `unlock[]` 中的 rerunnable 残留英文前移为 `needs_review`；rerun merge 后也会对完整 preview 再跑一次，减少局部 rerun 后旧行继续污染最终 apply。
 - 将当前批次内 name glossary 持久化为 `mod_translation_brief.json` 或 SQLite brief 表。
 - 翻译前预扫描整模组生成候选 name/term。
 - 翻译批次使用 frozen brief。
