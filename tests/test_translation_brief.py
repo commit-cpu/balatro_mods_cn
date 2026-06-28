@@ -2,10 +2,13 @@ from pathlib import Path
 
 from app.cli.translation_brief import (
     TranslationBrief,
+    apply_brief_name_seeds,
     brief_version,
     default_brief_path,
     load_translation_brief,
+    render_brief_context,
     save_translation_brief,
+    update_brief_from_preview,
 )
 
 
@@ -74,3 +77,115 @@ def test_brief_version_changes_when_content_changes() -> None:
     assert first.startswith("sha256:")
     assert second.startswith("sha256:")
     assert first != second
+
+
+def test_apply_brief_name_seeds_overrides_existing_seed() -> None:
+    seeds = {"descriptions.Edition.e_seal": "封印"}
+    source_names = {"descriptions.Edition.e_seal": "Seal"}
+    brief = TranslationBrief.empty(
+        mod_id="Familiar",
+        repo=Path("data/repos/Familiar"),
+        source="localization/en-us.lua",
+    )
+    brief.name_map["Seal"] = "蜡封"
+
+    apply_brief_name_seeds(seeds, source_names, brief)
+
+    assert seeds == {"descriptions.Edition.e_seal": "蜡封"}
+
+
+def test_render_brief_context_lists_confirmed_names_and_terms() -> None:
+    brief = TranslationBrief.empty(
+        mod_id="Familiar",
+        repo=Path("data/repos/Familiar"),
+        source="localization/en-us.lua",
+    )
+    brief.name_map["Seal"] = "蜡封"
+    brief.term_map["hand size"] = "手牌上限"
+
+    assert render_brief_context(brief) == (
+        "Confirmed mod translation brief:\n"
+        "- Seal => 蜡封\n"
+        "- hand size => 手牌上限"
+    )
+
+
+def test_update_brief_from_preview_promotes_accepted_names(tmp_path: Path) -> None:
+    brief = TranslationBrief.empty(
+        mod_id="Familiar",
+        repo=Path("data/repos/Familiar"),
+        source="localization/en-us.lua",
+    )
+    rows = [
+        {
+            "entry_key": "descriptions.Edition.e_seal",
+            "ok": True,
+            "needs_review": False,
+            "apply_mode": "unit",
+            "name": "蜡封",
+            "source": {"name": "Seal"},
+        }
+    ]
+
+    update_brief_from_preview(
+        brief,
+        rows,
+        audit_report={"untranslated_units": [], "residual_english": []},
+        preview_path=tmp_path / "preview.jsonl",
+        audit_path=tmp_path / "audit.json",
+        round_index=0,
+    )
+
+    assert brief.name_map == {"Seal": "蜡封"}
+    assert brief.last_preview == str(tmp_path / "preview.jsonl")
+    assert brief.last_audit == str(tmp_path / "audit.json")
+
+
+def test_update_brief_from_preview_records_conflict_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    brief = TranslationBrief.empty(
+        mod_id="Familiar",
+        repo=Path("data/repos/Familiar"),
+        source="localization/en-us.lua",
+    )
+    brief.name_map["Speckled"] = "斑点"
+    rows = [
+        {
+            "entry_key": "descriptions.Edition.e_speckle",
+            "ok": True,
+            "needs_review": False,
+            "apply_mode": "unit",
+            "name": "斑纹",
+            "source": {"name": "Speckled"},
+        }
+    ]
+
+    update_brief_from_preview(
+        brief,
+        rows,
+        audit_report={"untranslated_units": [], "residual_english": []},
+        preview_path=tmp_path / "preview.jsonl",
+        audit_path=tmp_path / "audit.json",
+        round_index=2,
+    )
+    update_brief_from_preview(
+        brief,
+        rows,
+        audit_report={"untranslated_units": [], "residual_english": []},
+        preview_path=tmp_path / "preview.jsonl",
+        audit_path=tmp_path / "audit.json",
+        round_index=2,
+    )
+
+    assert brief.name_map["Speckled"] == "斑点"
+    assert brief.open_questions == [
+        {
+            "kind": "name_conflict",
+            "source": "Speckled",
+            "existing": "斑点",
+            "candidate": "斑纹",
+            "entry_key": "descriptions.Edition.e_speckle",
+            "round": 2,
+        }
+    ]

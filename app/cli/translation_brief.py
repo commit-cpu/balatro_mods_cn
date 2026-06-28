@@ -79,6 +79,74 @@ def brief_version(brief: TranslationBrief) -> str:
     return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def render_brief_context(brief: TranslationBrief) -> str:
+    lines = ["Confirmed mod translation brief:"]
+    for source, target in sorted(brief.name_map.items()):
+        if source and target:
+            lines.append(f"- {source} => {target}")
+    for source, target in sorted(brief.term_map.items()):
+        if source and target:
+            lines.append(f"- {source} => {target}")
+    return "\n".join(lines) if len(lines) > 1 else ""
+
+
+def apply_brief_name_seeds(
+    seeds: dict[str, str],
+    source_names_by_entry: dict[str, str],
+    brief: TranslationBrief,
+) -> None:
+    for entry_key, source_name in source_names_by_entry.items():
+        target_name = brief.name_map.get(source_name)
+        if isinstance(target_name, str) and target_name:
+            seeds[entry_key] = target_name
+
+
+def update_brief_from_preview(
+    brief: TranslationBrief,
+    rows: list[dict[str, object]],
+    *,
+    audit_report: dict[str, object],
+    preview_path: Path,
+    audit_path: Path,
+    round_index: int,
+) -> None:
+    review_only_names = _review_only_name_texts(audit_report)
+    for row in rows:
+        if row.get("ok") is not True or row.get("needs_review") is True:
+            continue
+        if row.get("apply_mode") == "blocked":
+            continue
+        source = row.get("source")
+        if not isinstance(source, dict):
+            continue
+        source_name = source.get("name")
+        target_name = row.get("name")
+        entry_key = row.get("entry_key")
+        if not isinstance(source_name, str) or not isinstance(target_name, str):
+            continue
+        if not source_name or not target_name:
+            continue
+        if source_name in review_only_names and source_name not in brief.name_map:
+            continue
+        existing = brief.name_map.get(source_name)
+        if existing is None:
+            brief.name_map[source_name] = target_name
+        elif existing != target_name:
+            _append_open_question(
+                brief,
+                {
+                    "kind": "name_conflict",
+                    "source": source_name,
+                    "existing": existing,
+                    "candidate": target_name,
+                    "entry_key": entry_key if isinstance(entry_key, str) else "",
+                    "round": round_index,
+                },
+            )
+    brief.last_preview = str(preview_path)
+    brief.last_audit = str(audit_path)
+
+
 def _normalize_brief(brief: TranslationBrief) -> None:
     if not isinstance(brief.name_map, dict):
         brief.name_map = {}
@@ -92,3 +160,26 @@ def _normalize_brief(brief: TranslationBrief) -> None:
         brief.open_questions = []
     if not isinstance(brief.proposed_updates, list):
         brief.proposed_updates = []
+
+
+def _review_only_name_texts(audit_report: dict[str, object]) -> set[str]:
+    values: set[str] = set()
+    for section in ("residual_english", "untranslated_units"):
+        items = audit_report.get(section)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if item.get("severity") != "review":
+                continue
+            unit_key = item.get("unit_key")
+            text = item.get("text")
+            if isinstance(unit_key, str) and unit_key.endswith(".name") and isinstance(text, str):
+                values.add(text)
+    return values
+
+
+def _append_open_question(brief: TranslationBrief, question: dict[str, Any]) -> None:
+    if question not in brief.open_questions:
+        brief.open_questions.append(question)
