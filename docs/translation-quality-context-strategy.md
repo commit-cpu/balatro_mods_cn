@@ -6,7 +6,7 @@
 
 ## 背景
 
-当前流水线已经能做 entry 级 RAG 翻译预览，并能从 preview 写出 `zh_CN.lua`。Fortlatro 与 Familiar 的预览说明：token、JSONL 顺序、table-level 写回和基本术语审查已经可控，主要风险转移到了全文件终审、模组级 brief 持久化、未翻译残留检查和跨 entry 语义一致性。
+当前流水线已经能做 entry 级 RAG 翻译预览，并能从 preview 写出 `zh_CN.lua`。Fortlatro 与 Familiar 的预览说明：token、JSONL 顺序、table-level 写回、基本术语审查和模组级 brief 持久化已经可控，主要风险转移到了全文件终审、未翻译残留检查和跨 entry 语义一致性。
 
 LLM API 侧也有一个关键事实：OpenAI-compatible chat API 的“对话历史”通常不是服务端自动记忆，而是调用方每次把 `messages` 传给模型。也就是说，是否带历史、带多少历史、历史如何压缩，必须由我们自己的翻译编排层决定。
 
@@ -50,9 +50,7 @@ main.lua 的 info_queue / apply 文案
 其他 description text
 ```
 
-当前已实现 name prepass：先翻译本批全部 `name` 字段，生成 mod-wide EN/ZH name glossary，再把它注入每个 entry prompt。相关 entry 组内还会累积已经翻译好的局部上下文。这样可以显著减少同模组内名称漂移。
-
-仍未完成的是持久化 mod brief：name prepass 结果还没有写入可人工审查和复用的状态文件/数据库，下一次重新跑仍可能重新生成不同译名。
+当前已实现 name prepass 和持久化 mod brief：先翻译本批全部 `name` 字段，生成 mod-wide EN/ZH name glossary，再把它注入每个 entry prompt；`translate-entry-loop` 每轮 audit 后会把已接受的 name 对照写入 `<work-dir>/mod_translation_brief.json`，下一轮和后续批次通过 `--brief` 复用。brief 中的 confirmed name/term 优先级高于当前批次 name prepass、context preview 和 RAG/style refs。
 
 ### 3. Dense RAG 仍然会召回噪声
 
@@ -93,7 +91,7 @@ apply_warnings=["text line count mismatch: ..."]
 
 ### 7. 并发翻译和一致性存在天然冲突
 
-当前并发是正确的：RAG 顺序执行，LLM 并发请求，最终 JSONL 按源 entry 顺序写出。但并发 entry 各自独立，无法自然吸收“前面已经决定的译名”。当前通过“批次开始前 name prepass + frozen name glossary”缓解这个问题；完整解决仍需要持久化 mod brief 和批次 reducer。
+当前并发是正确的：RAG 顺序执行，LLM 并发请求，最终 JSONL 按源 entry 顺序写出。但并发 entry 各自独立，无法自然吸收“前面已经决定的译名”。当前通过“批次开始前 name prepass + frozen name glossary + 持久化 mod brief”缓解这个问题；brief 由 loop 在每轮 apply/audit 之后统一 reducer 合并，避免并发任务直接写状态。
 
 ## 连续对话历史方案分析
 
@@ -135,9 +133,10 @@ apply_warnings=["text line count mismatch: ..."]
 + LLM reviewer
 + 可审计的 retry
 + table-level Lua writer
++ 持久化 mod translation brief
 ```
 
-推荐下一阶段补上持久化结构化 mod brief，使批次间也能复用已确认译名和术语。
+当前已经补上持久化结构化 mod brief，使批次间能复用已确认译名和术语。
 
 ### 1. 原版 Balatro 风格包
 
@@ -166,43 +165,37 @@ uv run --frozen python -m app.cli.main build-style-pack \
 
 ### 2. Mod Translation Brief
 
-状态：尚未持久化。当前实现的是批次内 name prepass 和 prompt 内 global name glossary；下面仍是推荐的持久化目标。新增一个模组级状态文件或 SQLite 记录：
+状态：已落地为模组级 JSON 状态文件。`translate-entry-loop` 默认维护 `<work-dir>/mod_translation_brief.json`，也可以通过 `--brief path/to/brief.json` 指定。`translate-entry-preview-mod --brief` 只读取 brief，不更新；loop 在每轮 `apply-entry-preview` + `audit-entry-output` 后，从已接受 preview row 中合并 confirmed name 对照并保存。当前结构：
 
 ```json
 {
   "mod_id": "fortlatro",
   "locale": "zh_CN",
-  "style_rules": [
-    "使用简体中文。",
-    "Balatro 固有术语优先沿用原版中文。",
-    "说明文本要短，适合游戏内卡牌宽度。"
-  ],
   "term_map": {
-    "Negative": "负片",
-    "hand size": "手牌上限",
-    "Joker Slot": "小丑牌槽位"
+    "hand size": "手牌上限"
   },
   "name_map": {
-    "Mythic": "神话",
-    "Overshielded": "超护盾",
-    "Cel Shaded": "赛璐璐阴影",
-    "Crystal Shard": "水晶碎片"
+    "Seal": "蜡封",
+    "Stained Glass": "彩色玻璃"
   },
+  "label_map": {},
   "forbidden_terms": {
-    "Negative": ["负面", "阴性"],
-    "Sweaty Stake": ["汗注"]
+    "Negative": ["负面", "阴性"]
   },
-  "confirmed_entries": [
+  "open_questions": [
     {
-      "entry_key": "descriptions.Edition.e_fn_Nitro",
-      "source_name": "Nitro",
-      "target_name": "氮气",
-      "reason": "同模组内 edition label 使用"
+      "kind": "name_conflict",
+      "source": "Speckled",
+      "existing": "斑点",
+      "candidate": "斑驳",
+      "entry_key": "descriptions.Edition.e_fam_speckle",
+      "round": 1
     }
   ],
-  "open_questions": [
-    "Sweaty Stake 是保留 Fortnite 梗，还是翻译为高压赌注？"
-  ]
+  "proposed_updates": [],
+  "last_preview": "data/artifacts/.../round_01_preview.jsonl",
+  "last_audit": "data/artifacts/.../round_01_audit.json",
+  "updated_at": ""
 }
 ```
 
@@ -211,6 +204,8 @@ uv run --frozen python -m app.cli.main build-style-pack \
 - brief 是结构化数据，便于审计、diff、人工修改和自动测试。
 - brief 只保留“可复用的决策”，不保留完整 prompt 噪声。
 - brief 可以在并发批次开始前冻结，保证同一批结果可复现。
+- brief 合并只接受 `ok=true && needs_review=false && apply_mode!=blocked` 的 preview row；如果同一英文 name 已有 confirmed 译名，新候选不会覆盖旧值，而是进入 `open_questions`。
+- prompt 优先级为：confirmed brief name/term > 当前批次 name prepass / mod-wide name glossary > `--context-preview` 中已接受译名 > locked glossary / same-context RAG / loose RAG / style refs。
 
 ### 3. 术语抽取和锁定
 
@@ -336,6 +331,8 @@ LuaJIT 编译校验
 }
 ```
 
+这里的 `brief_version` 仍是本批 frozen locked term map 的哈希，用于术语审计兼容。模组级 translation brief 的版本由 `translate-entry-loop` 写入 `manifest.json` 的 `brief_version` 字段，和 `brief_path` 一起记录。
+
 ### Brief 更新规则
 
 不要让每个并发任务直接写 brief。采用批次合并：
@@ -343,8 +340,8 @@ LuaJIT 编译校验
 ```text
 1. 冻结 brief_v1。
 2. 并发翻译 batch。
-3. reviewer 产生 proposed_updates。
-4. reducer 按源顺序合并，生成 brief_v2。
+3. apply/audit 产生已接受 preview row 和问题清单。
+4. reducer 按源顺序合并已接受 name 对照，生成 brief_v2；冲突进入 open_questions。
 5. 下一批使用 brief_v2。
 ```
 
@@ -376,7 +373,7 @@ LuaJIT 编译校验
 - name prepass 生成批次内全局 name glossary，并注入每个 entry prompt；相同英文 name 出现多译时优先采用 description entry 译名，回填 label-only 条目。
 - 原版名称模式可推断复合词后缀，例如 `Seal -> 蜡封`；非原版跨类别精确同名引用和单词级误导引用会在 name prepass 中过滤，类别由 `descriptions.<Category>` 动态推导，不依赖特定 mod。
 - label-only 条目直接使用 name prepass 结果，不再调用 entry translator 生成空 body。
-- 完整 mod brief 结构、reducer 合并、全文件 final reviewer 仍属 Phase 3-4。
+- 更细的人工术语审批和全文件 final reviewer 仍属 Phase 3-4。
 
 ### Phase 2：解决写回限制
 
@@ -389,13 +386,15 @@ LuaJIT 编译校验
 
 ### Phase 3：模组级上下文闭环
 
+> 状态：主体已落地（2026-06-28）。命令级 loop、preview 一致性收敛和 JSON brief 持久化已经接入；`proposed_updates` 和更细的人工术语审批仍可后续增强。
+
 - `translate-entry-loop` 已提供命令级闭环：全量 preview、apply、audit、rerun keys、局部 rerun、安全 merge、完整 preview 一致性收敛、再次 apply/audit，并把每轮产物写入 work-dir/manifest，方便人工验收和后续分析。
 - preview consistency 已能复用同类别内重复 source body 的最佳译文，并把 `text[]` / `unlock[]` 中的 rerunnable 残留英文前移为 `needs_review`；rerun merge 后也会对完整 preview 再跑一次，减少局部 rerun 后旧行继续污染最终 apply。
-- 将当前批次内 name glossary 持久化为 `mod_translation_brief.json` 或 SQLite brief 表。
-- 翻译前预扫描整模组生成候选 name/term。
-- 翻译批次使用 frozen brief。
-- reviewer 输出 proposed_updates。
-- reducer 合并 brief，下一批继续。
+- `translate-entry-loop` 默认维护 `<work-dir>/mod_translation_brief.json`；也可显式传 `--brief`。
+- `translate-entry-preview-mod --brief` 会把 confirmed brief name/term 作为 frozen context 注入 prompt。
+- brief reducer 在每轮 apply/audit 后合并已接受 preview row，下一轮继续使用更新后的 brief。
+- `manifest.json` 记录 `brief_path` 和 `brief_version`。
+- 待增强：翻译前预扫描整模组生成更多候选 term、reviewer 输出 `proposed_updates`、人工审批后再提升为 confirmed term/name。
 
 ### Phase 4：完整模组评审
 
@@ -436,9 +435,9 @@ history_limit=10
 
 最靠谱的顺序是：
 
-1. 先补写回后的 extractor 覆盖校验、token inventory 复查和英文残留扫描。
-2. 再把当前 name prepass / name glossary 持久化为 mod brief，并支持人工修订。
-3. 然后做全文件 final reviewer。
+1. 继续增强写回后的 extractor 覆盖校验、token inventory 复查和英文残留扫描。
+2. 做全文件 final reviewer，覆盖跨 entry 术语、source typo、短英文专名和动态占位异常。
+3. 给 mod brief 增加人工审批流程，把 `open_questions` / `proposed_updates` 明确提升为 confirmed name/term。
 4. 最后再实验连续对话历史。
 
 原因是：连续历史只能改善“风格记忆”，不能修复漏抽取、RAG 噪声、写回行数和术语锁定这些基础问题。基础状态先结构化，后续无论用并发、顺序还是混合批次，都会更稳。
