@@ -21,6 +21,12 @@ from app.cli.translation_loop import (
     loop_round_artifacts,
     write_loop_manifest,
 )
+from app.cli.translation_brief import (
+    TranslationBrief,
+    apply_brief_name_seeds,
+    load_translation_brief,
+    render_brief_context,
+)
 from app.db.migrate import migrate as run_migrations
 from app.llm.client import OpenAICompatibleClient
 from app.llm.translator import TranslationReference, Translator
@@ -707,6 +713,7 @@ def translate_entry_preview_mod(
     concurrency: int | None = typer.Option(None, min=1),
     entry_keys_file: Path | None = typer.Option(None, exists=True, dir_okay=False),
     context_preview: Path | None = typer.Option(None, exists=True, dir_okay=False),
+    brief: Path | None = typer.Option(None, exists=False, dir_okay=False),
 ) -> None:
     load_dotenv()
     settings = load_settings()
@@ -797,7 +804,17 @@ def translate_entry_preview_mod(
         )
 
     context_rows = _read_preview_rows(context_preview) if context_preview is not None else []
+    translation_brief = (
+        load_translation_brief(brief, mod_id=repo.name, repo=repo, source=source)
+        if brief is not None
+        else TranslationBrief.empty(mod_id=repo.name, repo=repo, source=source)
+    )
     seeded_names = _seed_pretranslated_names(work_items, context_rows)
+    apply_brief_name_seeds(
+        seeded_names,
+        _source_names_by_entry(work_items),
+        translation_brief,
+    )
     pretranslated_names, name_failures = _translate_mod_entry_names(
         client_factory=_llm_client,
         model=llm_model,
@@ -808,6 +825,7 @@ def translate_entry_preview_mod(
     )
     pretranslated_names = _canonicalize_pretranslated_names(work_items, pretranslated_names)
     name_context = _join_prompt_contexts(
+        render_brief_context(translation_brief),
         _render_mod_name_glossary(work_items, pretranslated_names),
         _render_preview_translation_context(context_rows),
     )
@@ -2016,6 +2034,16 @@ def _seed_pretranslated_names(
             continue
         seeds[item.entry.entry_key] = next(iter(targets))
     return seeds
+
+
+def _source_names_by_entry(work_items: list[EntryWorkItem]) -> dict[str, str]:
+    names: dict[str, str] = {}
+    for item in work_items:
+        name_unit = getattr(item.entry, "name", None)
+        source_name = getattr(name_unit, "source_text", None)
+        if isinstance(source_name, str) and source_name:
+            names[item.entry.entry_key] = source_name
+    return names
 
 
 def _accepted_preview_name_targets(
