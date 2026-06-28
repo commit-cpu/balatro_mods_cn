@@ -113,6 +113,42 @@ class TestExtractBytes:
         units = extractor.extract_bytes(b"print('hello')")
         assert len(units) == 0
 
+    def test_duplicate_description_entries_get_stable_occurrence_keys(
+        self, extractor: LuaExtractor
+    ) -> None:
+        source = b"""return {
+    descriptions={
+        Spectral={
+            c_cry_pointer={
+                name="POINTER://",
+                text={"Create a card"},
+            },
+        },
+        Spectral={
+            c_cry_pointer={
+                name="POINTER://",
+                text={"Create another card"},
+            },
+        },
+    },
+}
+"""
+
+        units = extractor.extract_bytes(source)
+
+        assert [unit.unit_key for unit in units] == [
+            "descriptions.Spectral.c_cry_pointer.name",
+            "descriptions.Spectral.c_cry_pointer.text[0]",
+            "descriptions.Spectral.c_cry_pointer#2.name",
+            "descriptions.Spectral.c_cry_pointer#2.text[0]",
+        ]
+        assert [unit.source_text for unit in units] == [
+            "POINTER://",
+            "Create a card",
+            "POINTER://",
+            "Create another card",
+        ]
+
 
 MISC_LUA = b"""return {
     descriptions={

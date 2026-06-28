@@ -141,6 +141,83 @@ def test_update_brief_from_preview_promotes_accepted_names(tmp_path: Path) -> No
     assert brief.last_audit == str(tmp_path / "audit.json")
 
 
+def test_update_brief_from_preview_skips_misc_dictionary_sentences(
+    tmp_path: Path,
+) -> None:
+    brief = TranslationBrief.empty(
+        mod_id="Mayhem",
+        repo=Path("data/repos/Mayhem"),
+        source="localization/default.lua",
+    )
+    rows = [
+        {
+            "entry_key": "misc.dictionary.may_notif_welcome_d2",
+            "ok": True,
+            "needs_review": False,
+            "apply_mode": "unit",
+            "name": "在添加合适的教程之前，您应该查阅wiki",
+            "source": {
+                "name": "Until a proper tutorial is added, you should consult the wiki"
+            },
+        },
+        {
+            "entry_key": "misc.labels.fn_Mythic",
+            "ok": True,
+            "needs_review": False,
+            "apply_mode": "unit",
+            "name": "神话",
+            "source": {"name": "Mythic"},
+        },
+    ]
+
+    update_brief_from_preview(
+        brief,
+        rows,
+        audit_report={"untranslated_units": [], "residual_english": []},
+        preview_path=tmp_path / "preview.jsonl",
+        audit_path=tmp_path / "audit.json",
+        round_index=0,
+    )
+
+    assert brief.name_map == {"Mythic": "神话"}
+
+
+def test_update_brief_from_preview_removes_existing_misc_dictionary_pollution(
+    tmp_path: Path,
+) -> None:
+    brief = TranslationBrief.empty(
+        mod_id="Mayhem",
+        repo=Path("data/repos/Mayhem"),
+        source="localization/default.lua",
+    )
+    brief.name_map[
+        "Until a proper tutorial is added, you should consult the wiki"
+    ] = "在添加合适的教程之前，您应该查阅wiki"
+    rows = [
+        {
+            "entry_key": "misc.dictionary.may_notif_welcome_d2",
+            "ok": True,
+            "needs_review": False,
+            "apply_mode": "unit",
+            "name": "在添加合适的教程之前，您应该查阅wiki",
+            "source": {
+                "name": "Until a proper tutorial is added, you should consult the wiki"
+            },
+        }
+    ]
+
+    update_brief_from_preview(
+        brief,
+        rows,
+        audit_report={"untranslated_units": [], "residual_english": []},
+        preview_path=tmp_path / "preview.jsonl",
+        audit_path=tmp_path / "audit.json",
+        round_index=1,
+    )
+
+    assert brief.name_map == {}
+
+
 def test_update_brief_from_preview_records_conflict_without_overwrite(
     tmp_path: Path,
 ) -> None:

@@ -122,6 +122,10 @@ def update_brief_from_preview(
         source_name = source.get("name")
         target_name = row.get("name")
         entry_key = row.get("entry_key")
+        if not _can_promote_name_entry(entry_key):
+            if isinstance(source_name, str):
+                brief.name_map.pop(source_name, None)
+            continue
         if not isinstance(source_name, str) or not isinstance(target_name, str):
             continue
         if not source_name or not target_name:
@@ -178,6 +182,14 @@ def _review_only_name_texts(audit_report: dict[str, object]) -> set[str]:
             if isinstance(unit_key, str) and unit_key.endswith(".name") and isinstance(text, str):
                 values.add(text)
     return values
+
+
+def _can_promote_name_entry(entry_key: object) -> bool:
+    if not isinstance(entry_key, str):
+        return False
+    if entry_key.startswith("descriptions."):
+        return True
+    return entry_key.startswith("misc.labels.")
 
 
 def _append_open_question(brief: TranslationBrief, question: dict[str, Any]) -> None:

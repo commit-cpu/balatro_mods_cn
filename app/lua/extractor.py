@@ -119,74 +119,85 @@ class LuaExtractor:
 
 def _extract_description_units(source: bytes, desc_table, units: list[TranslationUnit]) -> None:
     """Append translation units for ``descriptions.<Category>.<entry>.{name|text|unlock}``."""
+    occurrences: dict[tuple[str, str], int] = {}
     for category_field in _iter_fields(desc_table):
-            category_name = _field_name(source, category_field)
-            category_table = _first_child_of_type(category_field, "table_constructor")
-            if category_table is None:
+        category_name = _field_name(source, category_field)
+        category_table = _first_child_of_type(category_field, "table_constructor")
+        if category_table is None:
+            continue
+
+        for entry_field in _iter_fields(category_table):
+            entry_key = _field_name(source, entry_field)
+            entry_table = _first_child_of_type(entry_field, "table_constructor")
+            if entry_table is None:
                 continue
+            occurrence_key = (category_name, entry_key)
+            occurrence = occurrences.get(occurrence_key, 0) + 1
+            occurrences[occurrence_key] = occurrence
+            unique_entry_key = _occurrence_entry_key(entry_key, occurrence)
 
-            for entry_field in _iter_fields(category_table):
-                entry_key = _field_name(source, entry_field)
-                entry_table = _first_child_of_type(entry_field, "table_constructor")
-                if entry_table is None:
-                    continue
+            # --- name ---
+            name_field = _find_field(source, entry_table, "name")
+            if name_field is not None:
+                str_node = _first_child_of_type(name_field, "string")
+                if str_node is not None:
+                    text, start, end = _string_content(source, str_node)
+                    units.append(
+                        TranslationUnit(
+                            unit_key=f"descriptions.{category_name}.{unique_entry_key}.name",
+                            source_text=text,
+                            byte_start=start,
+                            byte_end=end,
+                            context_type=f"{_context_label(category_name)}_name",
+                            tokens=extract_tokens(text),
+                        )
+                    )
 
-                # --- name ---
-                name_field = _find_field(source, entry_table, "name")
-                if name_field is not None:
-                    str_node = _first_child_of_type(name_field, "string")
-                    if str_node is not None:
+            # --- text (array of strings) ---
+            text_field = _find_field(source, entry_table, "text")
+            if text_field is not None:
+                text_table = _first_child_of_type(text_field, "table_constructor")
+                if text_table is not None:
+                    for idx, str_node in enumerate(_iter_array_strings(text_table)):
                         text, start, end = _string_content(source, str_node)
                         units.append(
                             TranslationUnit(
-                                unit_key=f"descriptions.{category_name}.{entry_key}.name",
+                                unit_key=(
+                                    f"descriptions.{category_name}.{unique_entry_key}.text[{idx}]"
+                                ),
                                 source_text=text,
                                 byte_start=start,
                                 byte_end=end,
-                                context_type=f"{_context_label(category_name)}_name",
+                                context_type=f"{_context_label(category_name)}_description_line",
                                 tokens=extract_tokens(text),
                             )
                         )
 
-                # --- text (array of strings) ---
-                text_field = _find_field(source, entry_table, "text")
-                if text_field is not None:
-                    text_table = _first_child_of_type(text_field, "table_constructor")
-                    if text_table is not None:
-                        for idx, str_node in enumerate(_iter_array_strings(text_table)):
-                            text, start, end = _string_content(source, str_node)
-                            units.append(
-                                TranslationUnit(
-                                    unit_key=(
-                                        f"descriptions.{category_name}.{entry_key}.text[{idx}]"
-                                    ),
-                                    source_text=text,
-                                    byte_start=start,
-                                    byte_end=end,
-                                    context_type=f"{_context_label(category_name)}_description_line",
-                                    tokens=extract_tokens(text),
-                                )
+            # --- unlock (array of strings) ---
+            unlock_field = _find_field(source, entry_table, "unlock")
+            if unlock_field is not None:
+                unlock_table = _first_child_of_type(unlock_field, "table_constructor")
+                if unlock_table is not None:
+                    for idx, str_node in enumerate(_iter_array_strings(unlock_table)):
+                        text, start, end = _string_content(source, str_node)
+                        units.append(
+                            TranslationUnit(
+                                unit_key=(
+                                    f"descriptions.{category_name}.{unique_entry_key}.unlock[{idx}]"
+                                ),
+                                source_text=text,
+                                byte_start=start,
+                                byte_end=end,
+                                context_type="unlock_condition",
+                                tokens=extract_tokens(text),
                             )
+                        )
 
-                # --- unlock (array of strings) ---
-                unlock_field = _find_field(source, entry_table, "unlock")
-                if unlock_field is not None:
-                    unlock_table = _first_child_of_type(unlock_field, "table_constructor")
-                    if unlock_table is not None:
-                        for idx, str_node in enumerate(_iter_array_strings(unlock_table)):
-                            text, start, end = _string_content(source, str_node)
-                            units.append(
-                                TranslationUnit(
-                                    unit_key=(
-                                        f"descriptions.{category_name}.{entry_key}.unlock[{idx}]"
-                                    ),
-                                    source_text=text,
-                                    byte_start=start,
-                                    byte_end=end,
-                                    context_type="unlock_condition",
-                                    tokens=extract_tokens(text),
-                                )
-                            )
+
+def _occurrence_entry_key(entry_key: str, occurrence: int) -> str:
+    if occurrence <= 1:
+        return entry_key
+    return f"{entry_key}#{occurrence}"
 
 
 def _extract_misc_units(source: bytes, outer_table, units: list[TranslationUnit]) -> None:

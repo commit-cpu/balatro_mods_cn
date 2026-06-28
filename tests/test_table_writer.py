@@ -70,3 +70,42 @@ def test_build_entry_table_patches_normalizes_embedded_newlines() -> None:
     assert errors == []
     assert '"从最多{C:attention}#2#{}张神圣牌中"' in patched
     assert '"从最多{C:attention}#2#{}张神圣牌中\\n"' not in patched
+
+
+def test_build_entry_table_patches_can_replace_second_duplicate_entry() -> None:
+    source = b"""return {
+    descriptions={
+        Spectral={
+            c_cry_pointer={
+                name="POINTER://",
+                text={"Create a card"},
+            },
+        },
+        Spectral={
+            c_cry_pointer={
+                name="POINTER://",
+                text={"Create another card"},
+            },
+        },
+    },
+}
+"""
+
+    patches, errors = build_entry_table_patches(
+        source,
+        [
+            EntryTableTranslation(
+                entry_key="descriptions.Spectral.c_cry_pointer#2",
+                name="://指针",
+                text=["创造另一张牌"],
+                unlock=[],
+            )
+        ],
+    )
+    patched = LuaPatcher().patch(source, patches).decode("utf-8")
+
+    assert errors == []
+    assert 'text={"Create a card"}' in patched
+    assert 'name="://指针"' in patched
+    assert '"创造另一张牌"' in patched
+    assert '"Create another card"' not in patched

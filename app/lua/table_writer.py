@@ -68,17 +68,32 @@ def _find_entry_table(source: bytes, desc_table, entry_key: str):
     parts = entry_key.split(".")
     if len(parts) != 3 or parts[0] != "descriptions":
         return None
-    category_field = _find_field(source, desc_table, parts[1])
-    if category_field is None:
-        return None
-    category_table = _first_child_of_type(category_field, "table_constructor")
-    if category_table is None:
-        return None
-    for entry_field in _iter_fields(category_table):
-        if _field_name(source, entry_field) != parts[2]:
+    category_name = parts[1]
+    raw_entry_name, target_occurrence = _split_occurrence_entry_name(parts[2])
+    seen = 0
+    for category_field in _iter_fields(desc_table):
+        if _field_name(source, category_field) != category_name:
             continue
-        return _first_child_of_type(entry_field, "table_constructor")
+        category_table = _first_child_of_type(category_field, "table_constructor")
+        if category_table is None:
+            continue
+        for entry_field in _iter_fields(category_table):
+            if _field_name(source, entry_field) != raw_entry_name:
+                continue
+            seen += 1
+            if seen == target_occurrence:
+                return _first_child_of_type(entry_field, "table_constructor")
     return None
+
+
+def _split_occurrence_entry_name(entry_name: str) -> tuple[str, int]:
+    if "#" not in entry_name:
+        return entry_name, 1
+    raw, suffix = entry_name.rsplit("#", 1)
+    if not raw or not suffix.isdecimal():
+        return entry_name, 1
+    occurrence = int(suffix)
+    return raw, occurrence if occurrence > 1 else 1
 
 
 def _append_name_patch(
