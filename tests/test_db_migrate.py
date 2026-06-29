@@ -22,6 +22,10 @@ def test_migrate_creates_core_tables(tmp_path: Path) -> None:
     assert "tm_entries" in tables
     assert "vector_outbox" in tables
     assert "rag_traces" in tables
+    assert "jobs" in tables
+    assert "feedback" in tables
+    assert "review_items" in tables
+    assert "pull_requests" in tables
 
 
 def test_migrate_creates_tm_fts(tmp_path: Path) -> None:

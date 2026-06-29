@@ -32,3 +32,5 @@ data/qdrant/storage/**
 !data/qdrant/snapshots/
 data/qdrant/snapshots/**
 !data/qdrant/snapshots/.gitkeep
+
+tmp

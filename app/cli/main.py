@@ -22,6 +22,10 @@ from app.cli.translation_loop import (
     loop_round_artifacts,
     write_loop_manifest,
 )
+from app.cli.incremental_translation import (
+    apply_missing_preview_to_source,
+    build_incremental_context,
+)
 from app.cli.translation_brief import (
     TranslationBrief,
     apply_brief_name_seeds,
@@ -626,6 +630,96 @@ def apply_entry_preview(
     )
 
 
+@app.command("build-incremental-entry-context")
+def build_incremental_entry_context(
+    repo: Path = typer.Option(..., exists=True, file_okay=False),
+    source: str = typer.Option(...),
+    target: Path = typer.Option(Path("localization/zh_CN.lua")),
+    context_preview: Path = typer.Option(...),
+    entry_keys_output: Path = typer.Option(...),
+    unit_keys_output: Path = typer.Option(...),
+) -> None:
+    """Build context and missing-key lists from an existing zh_CN.lua."""
+    source_path = repo / source
+    target_path = target if target.is_absolute() else repo / target
+    result = build_incremental_context(source_path, target_path)
+
+    context_preview.parent.mkdir(parents=True, exist_ok=True)
+    with context_preview.open("w", encoding="utf-8") as file:
+        for row in result.context_rows:
+            file.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+    entry_keys_output.parent.mkdir(parents=True, exist_ok=True)
+    entry_keys_output.write_text(
+        "\n".join(result.missing_entry_keys)
+        + ("\n" if result.missing_entry_keys else ""),
+        encoding="utf-8",
+    )
+    unit_keys_output.parent.mkdir(parents=True, exist_ok=True)
+    unit_keys_output.write_text(
+        "\n".join(result.missing_unit_keys)
+        + ("\n" if result.missing_unit_keys else ""),
+        encoding="utf-8",
+    )
+    console.print(
+        "Incremental context: "
+        f"source_units={result.source_unit_count} "
+        f"target_units={result.target_unit_count} "
+        f"context_rows={len(result.context_rows)} "
+        f"missing_entries={len(result.missing_entry_keys)} "
+        f"missing_units={len(result.missing_unit_keys)} "
+        f"context_preview={context_preview} "
+        f"entry_keys={entry_keys_output} "
+        f"unit_keys={unit_keys_output}"
+    )
+
+
+@app.command("apply-missing-entry-preview")
+def apply_missing_entry_preview(
+    repo: Path = typer.Option(..., exists=True, file_okay=False),
+    source: str = typer.Option(...),
+    target: Path = typer.Option(Path("localization/zh_CN.lua")),
+    input: Path = typer.Option(..., exists=True, dir_okay=False),
+    missing_unit_keys: Path = typer.Option(..., exists=True, dir_okay=False),
+    output: Path = typer.Option(Path("localization/zh_CN.lua")),
+    validate_lua: bool = typer.Option(True),
+) -> None:
+    """Apply only missing unit translations, preserving existing zh values."""
+    source_path = repo / source
+    target_path = target if target.is_absolute() else repo / target
+    output_path = output if output.is_absolute() else repo / output
+    if source_path.resolve() == output_path.resolve():
+        console.print("Refusing to overwrite source file; choose a different --output.")
+        raise typer.Exit(1)
+
+    try:
+        patched, stats = apply_missing_preview_to_source(
+            source_path=source_path,
+            target_path=target_path,
+            preview_rows=_read_preview_rows(input),
+            missing_unit_keys=_read_unit_key_set(missing_unit_keys),
+        )
+    except ValueError as exc:
+        console.print(f"Missing preview apply failed: {exc}")
+        raise typer.Exit(1) from exc
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = output_path.with_name(output_path.name + ".tmp")
+    tmp_path.write_bytes(patched)
+    if validate_lua:
+        valid, error = validate_file(tmp_path)
+        if not valid:
+            tmp_path.unlink(missing_ok=True)
+            console.print(f"Lua validation failed: {error}")
+            raise typer.Exit(1)
+    os.replace(tmp_path, output_path)
+    console.print(
+        "Applied missing entry preview: "
+        + " ".join(f"{key}={value}" for key, value in stats.items())
+        + f" output={output_path}"
+    )
+
+
 @app.command("rag-preview-mod")
 def rag_preview_mod(
     repo: Path = typer.Option(..., exists=True, file_okay=False),
@@ -938,6 +1032,16 @@ def _read_preview_rows(path: Path) -> list[dict[str, object]]:
 def _read_entry_key_filter(path: Path | None) -> set[str] | None:
     if path is None:
         return None
+    keys: set[str] = set()
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key = line.strip()
+        if not key or key.startswith("#"):
+            continue
+        keys.add(key)
+    return keys
+
+
+def _read_unit_key_set(path: Path) -> set[str]:
     keys: set[str] = set()
     for line in path.read_text(encoding="utf-8").splitlines():
         key = line.strip()
