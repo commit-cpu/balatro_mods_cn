@@ -1404,6 +1404,9 @@ def _row_apply_mode(row: dict[str, object]) -> str:
     if mode in {"unit", "table", "blocked"}:
         return str(mode)
     if _table_level_can_apply(row):
+        entry_key = row.get("entry_key")
+        if isinstance(entry_key, str) and not entry_key.startswith("descriptions."):
+            return "blocked"
         return "table"
     return "blocked"
 
@@ -2316,7 +2319,7 @@ def _translate_entry_preview_row(
         unlock=translated.unlock,
         ok=ok,
     )
-    apply_mode = _entry_apply_mode(patchable, patch_warnings)
+    apply_mode = _entry_apply_mode(patchable, patch_warnings, entry_key=entry.entry_key)
     review = _entry_review(
         entry=entry,
         name=name,
@@ -2371,7 +2374,7 @@ def _entry_name_only_preview_row(
         unlock=unlock,
         ok=True,
     )
-    apply_mode = _entry_apply_mode(patchable, patch_warnings)
+    apply_mode = _entry_apply_mode(patchable, patch_warnings, entry_key=entry.entry_key)
     review = _entry_review(
         entry=entry,
         name=name,
@@ -2555,7 +2558,11 @@ def _refresh_row_apply_metadata(row: dict[str, object]) -> None:
     row["patchable"] = patchable
     row["patch_warnings"] = warnings
     row["apply_warnings"] = warnings
-    row["apply_mode"] = _entry_apply_mode(patchable, warnings)
+    row["apply_mode"] = _entry_apply_mode(
+        patchable,
+        warnings,
+        entry_key=str(row.get("entry_key") or ""),
+    )
 
 
 def _apply_residual_english_review(row: dict[str, object]) -> None:
@@ -2837,9 +2844,12 @@ def _entry_review(
             )
         ]
     quality = quality_review or _empty_quality_review()
+    consistency_warnings: list[str] = []
+    if _entry_has_runtime_units(entry):
+        consistency_warnings.append("Runtime-generated localization requires manual source update")
     return {
         "term_violations": violations,
-        "consistency_warnings": [],
+        "consistency_warnings": consistency_warnings,
         "naturalness_warnings": list(getattr(quality, "naturalness_warnings", [])),
         "meaning_warnings": list(getattr(quality, "meaning_warnings", [])),
         "rewrite_hint": getattr(quality, "rewrite_hint", ""),
@@ -2916,6 +2926,8 @@ def _entry_patchability(
     warnings: list[str] = []
     if not ok:
         warnings.append("entry translation failed")
+    if _entry_has_runtime_units(entry):
+        warnings.append("runtime-generated localization cannot be patched automatically")
     if entry.name is not None and name is None:
         warnings.append("missing name translation")
     if len(text) != len(entry.text):
@@ -2927,12 +2939,31 @@ def _entry_patchability(
     return ok and not warnings, warnings
 
 
-def _entry_apply_mode(patchable: bool, warnings: list[str]) -> str:
+def _entry_apply_mode(
+    patchable: bool,
+    warnings: list[str],
+    *,
+    entry_key: str = "",
+) -> str:
     if patchable:
         return "unit"
     if warnings and all(_is_table_level_apply_warning(warning) for warning in warnings):
+        if entry_key and not entry_key.startswith("descriptions."):
+            return "blocked"
         return "table"
     return "blocked"
+
+
+def _entry_has_runtime_units(entry) -> bool:
+    units = []
+    if entry.name is not None:
+        units.append(entry.name)
+    units.extend(entry.text)
+    units.extend(entry.unlock)
+    return any(
+        getattr(unit, "byte_start", 0) < 0 or getattr(unit, "byte_end", 0) < 0
+        for unit in units
+    )
 
 
 def _entry_translatable_body(entry) -> str:

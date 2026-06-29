@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -148,6 +149,73 @@ class TestExtractBytes:
             "POINTER://",
             "Create another card",
         ]
+
+    def test_extracts_generic_top_level_return_strings(
+        self, extractor: LuaExtractor
+    ) -> None:
+        source = b"""return {
+    ExtraEffects = {
+        create_temp_copy = {
+            name = "Cheap Clone",
+            text = {
+                "When a Blind is selected",
+                "create a temporary copy",
+            },
+        },
+    },
+    Menus = {
+        help = {
+            name = "Overview",
+            text = {
+                {
+                    name = "Section",
+                    text = {
+                        {
+                            "Nested line",
+                        },
+                    },
+                },
+            },
+        },
+    },
+}
+"""
+
+        units = extractor.extract_bytes(source)
+        by_key = {unit.unit_key: unit.source_text for unit in units}
+
+        assert by_key["ExtraEffects.create_temp_copy.name"] == "Cheap Clone"
+        assert by_key["ExtraEffects.create_temp_copy.text[0]"] == "When a Blind is selected"
+        assert by_key["ExtraEffects.create_temp_copy.text[1]"] == "create a temporary copy"
+        assert by_key["Menus.help.name"] == "Overview"
+        assert by_key["Menus.help.text[0].name"] == "Section"
+        assert by_key["Menus.help.text[0].text[0][0]"] == "Nested line"
+
+    @pytest.mark.skipif(not shutil.which("luajit"), reason="luajit not installed")
+    def test_extract_file_includes_runtime_generated_return_strings(
+        self, extractor: LuaExtractor, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "en-us.lua"
+        path.write_text(
+            """local generated = {}
+for i = 3, 4 do
+    generated["akyrs_"..i.."-letter Word"] = i.."-letter Word"
+end
+return {
+    misc = {
+        poker_hands = generated,
+    },
+}
+""",
+            encoding="utf-8",
+        )
+
+        units = extractor.extract_file(path)
+        by_key = {unit.unit_key: unit for unit in units}
+
+        assert by_key["misc.poker_hands.akyrs_3-letter Word"].source_text == "3-letter Word"
+        assert by_key["misc.poker_hands.akyrs_4-letter Word"].source_text == "4-letter Word"
+        assert by_key["misc.poker_hands.akyrs_3-letter Word"].byte_start == -1
 
 
 MISC_LUA = b"""return {

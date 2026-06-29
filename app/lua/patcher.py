@@ -91,7 +91,11 @@ def build_patch_instructions(
     in the translation map but had no matching unit (or vice versa).
     """
     unit_lookup: dict[str, tuple[int, int]] = {}
+    unpatchable_keys: set[str] = set()
     for u in units:
+        if u.byte_start < 0 or u.byte_end < 0:
+            unpatchable_keys.add(u.unit_key)
+            continue
         unit_lookup[u.unit_key] = (u.byte_start, u.byte_end)
 
     instructions: list[PatchInstruction] = []
@@ -101,7 +105,7 @@ def build_patch_instructions(
     unit_keys = set(unit_lookup.keys())
 
     # Keys in translations but not in units
-    for key in sorted(translated_keys - unit_keys):
+    for key in sorted(translated_keys - unit_keys - unpatchable_keys):
         errors.append(f"Translation has no matching unit: {key}")
 
     # Keys in units but not in translations

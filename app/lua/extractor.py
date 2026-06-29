@@ -12,6 +12,9 @@ extracting every translatable string together with:
 from __future__ import annotations
 
 import re
+import json
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -79,7 +82,9 @@ class LuaExtractor:
     def extract_file(self, path: Path) -> list[TranslationUnit]:
         """Parse *path* and return all translation units."""
         source = path.read_bytes()
-        return self.extract_bytes(source)
+        units = self.extract_bytes(source)
+        units.extend(_extract_runtime_units(path, existing_keys={unit.unit_key for unit in units}))
+        return units
 
     def extract_bytes(self, source: bytes) -> list[TranslationUnit]:
         """Parse raw Lua *source* bytes and return all translation units."""
@@ -113,6 +118,15 @@ class LuaExtractor:
         # Walk misc.{dictionary,labels,quips} – UI strings, labels and quips
         # that descriptions-only extraction would otherwise miss.
         _extract_misc_units(source, outer_table, units)
+
+        # Walk every other top-level table recursively. Large mods often add
+        # custom localization sections such as Menus or ExtraEffects.
+        _extract_generic_return_units(
+            source,
+            outer_table,
+            units,
+            skip_top_level={"descriptions", "misc"},
+        )
 
         return units
 
@@ -260,12 +274,201 @@ def _extract_misc_units(source: bytes, outer_table, units: list[TranslationUnit]
                 )
 
 
+def _extract_generic_return_units(
+    source: bytes,
+    outer_table,
+    units: list[TranslationUnit],
+    *,
+    skip_top_level: set[str],
+) -> None:
+    for field_node in _iter_fields(outer_table):
+        key = _field_key(source, field_node)
+        if not key or key in skip_top_level:
+            continue
+        value = field_node.child_by_field_name("value")
+        if value is None:
+            continue
+        _walk_generic_value(source, value, key, units)
+
+
+def _walk_generic_value(source: bytes, node, path: str, units: list[TranslationUnit]) -> None:
+    if node.type == "string":
+        text, start, end = _string_content(source, node)
+        units.append(
+            TranslationUnit(
+                unit_key=path,
+                source_text=text,
+                byte_start=start,
+                byte_end=end,
+                context_type=_generic_context_type(path),
+                tokens=extract_tokens(text),
+            )
+        )
+        return
+    if node.type != "table_constructor":
+        return
+
+    array_index = 0
+    for child in node.children:
+        if child.type == "field":
+            value = child.child_by_field_name("value")
+            if value is None:
+                continue
+            key = _field_key(source, child)
+            if key:
+                child_path = f"{path}.{key}"
+            else:
+                child_path = f"{path}[{array_index}]"
+                array_index += 1
+            _walk_generic_value(source, value, child_path, units)
+        elif child.type == "string":
+            child_path = f"{path}[{array_index}]"
+            array_index += 1
+            _walk_generic_value(source, child, child_path, units)
+
+
 def _misc_context_type(section_name: str) -> str:
     if section_name == "labels":
         return "misc_label"
     if section_name == "dictionary":
         return "misc_dictionary"
     return f"misc_{section_name}"
+
+
+def _generic_context_type(unit_key: str) -> str:
+    first = unit_key.split(".", 1)[0].lower()
+    first = re.sub(r"[^a-z0-9]+", "_", first).strip("_") or "generic"
+    if unit_key.endswith(".name"):
+        return f"{first}_name"
+    if re.search(r"(?:^|\.)unlock(?:\[|\.)", unit_key):
+        return "unlock_condition"
+    if re.search(r"(?:^|\.)text(?:\[|\.)", unit_key):
+        return f"{first}_description_line"
+    return f"{first}_text"
+
+
+def _context_type_for_unit_key(unit_key: str) -> str:
+    if unit_key.startswith("descriptions."):
+        parts = unit_key.split(".")
+        if len(parts) >= 4:
+            label = _context_label(parts[1])
+            if parts[-1] == "name":
+                return f"{label}_name"
+            if re.match(r"^text\[\d+\]$", parts[-1]):
+                return f"{label}_description_line"
+            if re.match(r"^unlock\[\d+\]$", parts[-1]):
+                return "unlock_condition"
+    if unit_key.startswith("misc."):
+        parts = unit_key.split(".")
+        if len(parts) >= 2:
+            section = parts[1]
+            if "[" in unit_key:
+                return "quip_line" if section == "quips" else _misc_context_type(section)
+            return _misc_context_type(section)
+    return _generic_context_type(unit_key)
+
+
+_RUNTIME_EXTRACTOR_LUA = r'''
+local path = arg[1]
+local chunk, load_err = loadfile(path)
+if not chunk then
+  io.stderr:write(load_err or "loadfile failed")
+  os.exit(2)
+end
+local ok, root = pcall(chunk)
+if not ok then
+  io.stderr:write(tostring(root))
+  os.exit(3)
+end
+local function esc(value)
+  value = tostring(value)
+  value = value:gsub("\\", "\\\\")
+  value = value:gsub('"', '\\"')
+  value = value:gsub("\n", "\\n")
+  value = value:gsub("\r", "\\r")
+  value = value:gsub("\t", "\\t")
+  return '"' .. value .. '"'
+end
+local function sorted_keys(tbl)
+  local keys = {}
+  for key, _ in pairs(tbl) do
+    keys[#keys + 1] = key
+  end
+  table.sort(keys, function(a, b)
+    if type(a) == type(b) then return tostring(a) < tostring(b) end
+    return type(a) < type(b)
+  end)
+  return keys
+end
+local function key_path(parent, key)
+  if type(key) == "number" then
+    return parent .. "[" .. tostring(key - 1) .. "]"
+  end
+  key = tostring(key)
+  if parent == "" then return key end
+  return parent .. "." .. key
+end
+local seen = {}
+local function walk(value, path)
+  local value_type = type(value)
+  if value_type == "string" then
+    io.write(esc(path), "\t", esc(value), "\n")
+    return
+  end
+  if value_type ~= "table" then return end
+  if seen[value] then return end
+  seen[value] = true
+  for _, key in ipairs(sorted_keys(value)) do
+    walk(value[key], key_path(path, key))
+  end
+end
+walk(root, "")
+'''
+
+
+def _extract_runtime_units(path: Path, *, existing_keys: set[str]) -> list[TranslationUnit]:
+    try:
+        with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".lua", delete=True) as script:
+            script.write(_RUNTIME_EXTRACTOR_LUA)
+            script.flush()
+            result = subprocess.run(
+                ["luajit", script.name, str(path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return []
+    if result.returncode != 0:
+        return []
+
+    units: list[TranslationUnit] = []
+    for line in result.stdout.splitlines():
+        if "\t" not in line:
+            continue
+        raw_key, raw_text = line.split("\t", 1)
+        try:
+            unit_key = json.loads(raw_key)
+            source_text = json.loads(raw_text)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(unit_key, str) or not isinstance(source_text, str):
+            continue
+        if not unit_key or unit_key in existing_keys:
+            continue
+        existing_keys.add(unit_key)
+        units.append(
+            TranslationUnit(
+                unit_key=unit_key,
+                source_text=source_text,
+                byte_start=-1,
+                byte_end=-1,
+                context_type=_context_type_for_unit_key(unit_key),
+                tokens=extract_tokens(source_text),
+            )
+        )
+    return units
+
 
 
 # ---------------------------------------------------------------------------

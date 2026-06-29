@@ -6,12 +6,16 @@ import time
 
 from app.cli.main import (
     _apply_preview_consistency,
+    _entry_apply_mode,
+    _entry_patchability,
     _entry_style_examples,
     _llm_concurrency,
     _llm_config,
     _name_prepass_allows_reference,
     app,
 )
+from app.lua.extractor import TranslationUnit
+from app.lua.grouping import TranslationEntry
 from app.db.migrate import migrate
 from app.llm.style_pack import StyleCategory, StyleExample, StylePack
 from app.rag.term_checker import LockedTermInfo, check_entry_terms
@@ -34,6 +38,31 @@ def test_cli_has_rag_commands() -> None:
     assert "rag-preview-mod" in result.output
     assert "translate-preview-mod" in result.output
     assert "translate-entry-preview-mod" in result.output
+
+
+def test_runtime_generated_entry_is_not_patchable() -> None:
+    entry = TranslationEntry(
+        entry_key="misc.poker_hands.akyrs_3-letter Word",
+        name=TranslationUnit(
+            unit_key="misc.poker_hands.akyrs_3-letter Word",
+            source_text="3-letter Word",
+            byte_start=-1,
+            byte_end=-1,
+            context_type="misc_poker_hands",
+        ),
+    )
+
+    patchable, warnings = _entry_patchability(
+        entry=entry,
+        name="3字母单词",
+        text=[],
+        unlock=[],
+        ok=True,
+    )
+
+    assert patchable is False
+    assert warnings == ["runtime-generated localization cannot be patched automatically"]
+    assert _entry_apply_mode(patchable, warnings) == "blocked"
 
 
 def test_build_style_pack_command_writes_json(monkeypatch, tmp_path) -> None:

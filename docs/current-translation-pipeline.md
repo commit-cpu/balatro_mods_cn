@@ -27,6 +27,7 @@
 - 已能维护模组级 `mod_translation_brief.json`，把已接受的 name 对照持久化下来，并在下一轮 preview/loop 中作为更高优先级上下文复用。
 - 已能在 preview consistency 阶段复用同类别内完全相同 source body 的最佳译文，避免同一英文模板在不同 entry 中翻出多套断句/用词；rerun merge 后也会对完整 preview 再跑一次一致性收敛。
 - 已能在 preview 阶段标记 `text[]` / `unlock[]` 中的 rerunnable 残留英文，例如 `lvl`、`Imaginary`、`Consumble`、`null`，避免这些坏译文直接进入 apply。
+- 已能递归解析非标准顶层本地化表，例如 `Menus`、`ExtraEffects`；也会通过 LuaJIT 展开纯 localization 文件中由循环或变量生成的返回表字段，例如动态 `descriptions.Alphabet` 和 `misc.poker_hands`。
 
 还没有完成：
 
@@ -109,6 +110,8 @@ bash -lc 'set -a; source .env; set +a; uv run --frozen python -m app.cli.main tr
 流程：
 
 1. `LuaExtractor` 从源 Lua 中提取 `TranslationUnit`。
+   - 静态字面量会带 byte span，可参与安全 patch。
+   - 运行时展开得到的动态字段会带 `byte_start=-1` / `byte_end=-1`，进入 preview/audit，但默认 `apply_mode=blocked`，避免把无法定位源码 span 的字段误写回。
 2. `group_translation_units` 按 entry 聚合：
    - `name`
    - `text[]`
@@ -338,6 +341,7 @@ LLM 返回完整未换行中文字符串，程序负责换行。
 
 - 默认模式只写 `ok=true && needs_review=false && apply_mode=unit`，使用 byte-level patcher，最大限度保留源文件结构。
 - `--table-level` 模式还会写入 `ok=true && needs_review=false && apply_mode=table` 的 entry，使用 table-level writer 整段替换对应 `text={...}` / `unlock={...}` 数组。
+- `apply_mode=table` 只用于 `descriptions.*` entry；非 `descriptions.*` 的行数变化会保留为 `blocked` / review 项，避免当前 table writer 误处理 `misc.v_text`、`Menus` 等自定义结构。
 - `ok=false` 不会写回。
 - `needs_review=true` 默认不会写回；只有显式传 `--include-needs-review` 才会写回。
 - 旧 preview JSONL 如果没有 `apply_mode`，apply 阶段会从 `patchable`、`patch_warnings` 和目标/译文行数差异推断 `unit` / `table` / `blocked`。
