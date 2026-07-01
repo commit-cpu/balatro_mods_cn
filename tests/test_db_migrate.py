@@ -23,9 +23,37 @@ def test_migrate_creates_core_tables(tmp_path: Path) -> None:
     assert "vector_outbox" in tables
     assert "rag_traces" in tables
     assert "jobs" in tables
+    assert "job_events" in tables
     assert "feedback" in tables
     assert "review_items" in tables
     assert "pull_requests" in tables
+    assert "app_settings" in tables
+    assert "translation_queue" in tables
+
+
+def test_translation_queue_has_active_mod_unique_index(tmp_path: Path) -> None:
+    db_path = tmp_path / "balatro_cn.db"
+
+    migrate(db_path)
+
+    with connect(db_path) as db:
+        db.execute(
+            """
+            insert into translation_queue(mod_id, source_name, repo_url, priority, status)
+            values ('alpha_mod', 'Alpha Mod', 'https://github.com/example/alpha', 1000, 'queued')
+            """
+        )
+        try:
+            db.execute(
+                """
+                insert into translation_queue(mod_id, source_name, repo_url, priority, status)
+                values ('alpha_mod', 'Alpha Mod', 'https://github.com/example/alpha', 1001, 'running')
+                """
+            )
+        except Exception as exc:
+            assert "unique" in str(exc).casefold()
+        else:
+            raise AssertionError("duplicate active queue row was accepted")
 
 
 def test_migrate_creates_tm_fts(tmp_path: Path) -> None:

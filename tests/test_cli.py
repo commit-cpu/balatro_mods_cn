@@ -9,13 +9,17 @@ from app.cli.main import (
     _entry_apply_mode,
     _entry_patchability,
     _entry_style_examples,
+    _translate_mod_entry_names,
     _llm_concurrency,
     _llm_config,
     _name_prepass_allows_reference,
+    reset_translation_progress_callback,
+    set_translation_progress_callback,
     app,
 )
 from app.lua.extractor import TranslationUnit
 from app.lua.grouping import TranslationEntry
+from app.cli.translation_loop import loop_round_artifacts, write_loop_manifest
 from app.db.migrate import migrate
 from app.llm.style_pack import StyleCategory, StyleExample, StylePack
 from app.rag.term_checker import LockedTermInfo, check_entry_terms
@@ -882,6 +886,75 @@ def test_translate_entry_preview_mod_logs_parallel_failure_summary(
     assert "style_refs=1" in result.output
     assert "LLM failed [2/2] descriptions.Joker.j_fail: upstream timeout" in result.output
     assert "Preview summary: ok=0 failed=1 token_error_entries=1 needs_review=2" in result.output
+
+
+def test_name_pretranslation_emits_progress_events() -> None:
+    events: list[tuple[str, str, dict[str, object]]] = []
+
+    class FakeClient:
+        def close(self) -> None:
+            pass
+
+    class FakeTranslator:
+        def __init__(self, client, model) -> None:
+            self.client = client
+            self.model = model
+
+        def translate(self, *, source_text, references):
+            class Result:
+                candidate_text = f"{source_text} CN"
+                token_errors: list[str] = []
+
+            return Result()
+
+    entry = TranslationEntry(
+        entry_key="descriptions.Joker.j_demo",
+        name=TranslationUnit(
+            unit_key="descriptions.Joker.j_demo.name",
+            source_text="Demo Joker",
+            byte_start=0,
+            byte_end=10,
+            context_type="joker",
+        ),
+    )
+    from app.cli import main as cli_main
+
+    token = set_translation_progress_callback(
+        lambda event, message, payload: events.append((event, message, payload))
+    )
+    old_translator = cli_main.Translator
+    cli_main.Translator = FakeTranslator
+    try:
+        names, failures = _translate_mod_entry_names(
+            client_factory=FakeClient,
+            model="fake-model",
+            work_items=[
+                cli_main.EntryWorkItem(
+                    index=1,
+                    entry=entry,
+                    references=[],
+                    body_text="",
+                    credit_lines=[],
+                    tier_by_id={},
+                    style_examples=None,
+                )
+            ],
+            term_map={},
+            max_workers=1,
+            seed_names={},
+        )
+    finally:
+        cli_main.Translator = old_translator
+        reset_translation_progress_callback(token)
+
+    assert names == {"descriptions.Joker.j_demo": "Demo Joker CN"}
+    assert failures == 0
+    assert [event for event, _message, _payload in events] == [
+        "translation.name_glossary.start",
+        "translation.name.done",
+    ]
+    assert events[0][2]["total"] == 1
+    assert events[1][2]["current"] == 1
 
 
 def test_translate_entry_preview_mod_accumulates_related_group_context(
@@ -2606,6 +2679,84 @@ def test_translate_entry_preview_marks_line_count_mismatch_as_table_apply_mode(
     assert rows[0]["patch_warnings"] == ["text line count mismatch: source=1, target=2"]
 
 
+def test_translate_entry_preview_merges_non_description_single_line_arrays(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            assert path == source
+            return [
+                FakeUnit(
+                    "misc.v_text.ch_c_demo[0]",
+                    "Economy Jokers, Gold Seal and Lucky Card are banned",
+                ),
+            ]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate_entry(self, **kwargs):
+            class Result:
+                name = None
+                text = ["经济小丑、", "金色蜡封和", "幸运牌被禁用"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--limit",
+            "1",
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["entry_key"] == "misc.v_text.ch_c_demo"
+    assert rows[0]["text"] == ["经济小丑、金色蜡封和幸运牌被禁用"]
+    assert rows[0]["patchable"] is True
+    assert rows[0]["apply_mode"] == "unit"
+
+
 def test_apply_entry_preview_writes_only_safe_patchable_rows(
     monkeypatch,
     tmp_path,
@@ -3564,6 +3715,209 @@ def test_translate_entry_loop_runs_full_then_rerun_until_clean(monkeypatch, tmp_
     assert brief["name_map"] == {"One": "一"}
     assert "Translation loop complete" in result.output
     assert "stopped_reason=no_rerun_keys" in result.output
+
+
+def test_translate_entry_loop_resumes_from_completed_manifest(monkeypatch, tmp_path) -> None:
+    repo = tmp_path / "Familiar"
+    source = repo / "localization" / "en-us.lua"
+    source.parent.mkdir(parents=True)
+    source.write_text("return {}\n", encoding="utf-8")
+    work_dir = tmp_path / "loop"
+    output = Path("localization/zh_CN.lua")
+    round0 = work_dir / "round_00_preview.jsonl"
+    round0_target = work_dir / "round_00_zh_CN.lua"
+    round0_audit = work_dir / "round_00_audit.json"
+    round0_keys = work_dir / "round_00_rerun_keys.txt"
+    work_dir.mkdir(parents=True)
+    round0.write_text(
+        json.dumps({"entry_key": "descriptions.Joker.j_one", "ok": True}) + "\n",
+        encoding="utf-8",
+    )
+    round0_target.write_text("-- round 0\n", encoding="utf-8")
+    round0_audit.write_text(
+        json.dumps(
+            {
+                "summary": {"needs_review": 1},
+                "failed_rows": [],
+                "needs_review_rows": [],
+                "residual_english": [],
+                "untranslated_units": [],
+                "label_name_mismatches": [],
+                "name_inconsistencies": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    round0_keys.write_text("descriptions.Joker.j_one\n", encoding="utf-8")
+    write_loop_manifest(
+        path=work_dir / "manifest.json",
+        repo=repo,
+        source="localization/en-us.lua",
+        output=repo / output,
+        work_dir=work_dir,
+        max_rounds=3,
+        completed_rounds=1,
+        stopped_reason="running",
+        rounds=[loop_round_artifacts(work_dir, 0)],
+        final_audit_summary={"needs_review": 1},
+        brief_path=work_dir / "mod_translation_brief.json",
+        brief_version="sha256:test",
+    )
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_translate_entry_preview_mod(**kwargs):
+        calls.append(("translate", kwargs))
+        assert kwargs["entry_keys_file"] == round0_keys
+        assert kwargs["context_preview"] == round0
+        out = kwargs["output"]
+        assert isinstance(out, Path)
+        out.write_text(
+            json.dumps({"entry_key": "descriptions.Joker.j_one", "ok": True}) + "\n",
+            encoding="utf-8",
+        )
+
+    def fake_merge_entry_preview(**kwargs):
+        calls.append(("merge", kwargs))
+        assert kwargs["base"] == round0
+        output_path = kwargs["output"]
+        assert isinstance(output_path, Path)
+        output_path.write_text(kwargs["updates"].read_text(encoding="utf-8"), encoding="utf-8")
+
+    def fake_apply_entry_preview(**kwargs):
+        calls.append(("apply", kwargs))
+        out = kwargs["output"]
+        assert isinstance(out, Path)
+        out.write_text(f"-- generated from {kwargs['input'].name}\n", encoding="utf-8")
+
+    def fake_audit_entry_output(**kwargs):
+        calls.append(("audit", kwargs))
+        kwargs["json_output"].write_text(
+            json.dumps(
+                {
+                    "summary": {"needs_review": 0},
+                    "failed_rows": [],
+                    "needs_review_rows": [],
+                    "residual_english": [],
+                    "untranslated_units": [],
+                    "label_name_mismatches": [],
+                    "name_inconsistencies": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        "app.cli.main.translate_entry_preview_mod", fake_translate_entry_preview_mod
+    )
+    monkeypatch.setattr("app.cli.main.merge_entry_preview", fake_merge_entry_preview)
+    monkeypatch.setattr("app.cli.main.apply_entry_preview", fake_apply_entry_preview)
+    monkeypatch.setattr("app.cli.main.audit_entry_output", fake_audit_entry_output)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-loop",
+            "--repo",
+            str(repo),
+            "--source",
+            "localization/en-us.lua",
+            "--output",
+            str(output),
+            "--work-dir",
+            str(work_dir),
+            "--max-rounds",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [name for name, _ in calls] == ["translate", "merge", "apply", "audit"]
+    assert (repo / output).read_text(encoding="utf-8") == (
+        "-- generated from round_01_preview.jsonl\n"
+    )
+    manifest = json.loads((work_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["completed_rounds"] == 2
+    assert manifest["rounds"][0]["preview"] == str(round0)
+    assert manifest["rounds"][1]["preview"] == str(work_dir / "round_01_preview.jsonl")
+
+
+def test_translate_entry_loop_reuses_completed_max_rounds_manifest(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    repo = tmp_path / "Bakery"
+    source = repo / "localization" / "en-us.lua"
+    source.parent.mkdir(parents=True)
+    source.write_text("return {}\n", encoding="utf-8")
+    work_dir = tmp_path / "loop"
+    output = Path("candidate_zh_CN.lua")
+    rounds = []
+    for index in range(3):
+        artifacts = loop_round_artifacts(work_dir, index)
+        artifacts.preview.parent.mkdir(parents=True, exist_ok=True)
+        artifacts.preview.write_text(
+            json.dumps({"entry_key": f"descriptions.Joker.j_{index}", "ok": True}) + "\n",
+            encoding="utf-8",
+        )
+        artifacts.target.write_text(f"-- round {index}\n", encoding="utf-8")
+        artifacts.audit.write_text(
+            json.dumps(
+                {
+                    "summary": {"needs_review": index},
+                    "failed_rows": [],
+                    "needs_review_rows": [],
+                    "residual_english": [],
+                    "untranslated_units": [],
+                    "label_name_mismatches": [],
+                    "name_inconsistencies": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        artifacts.rerun_keys.write_text("descriptions.Joker.j_retry\n", encoding="utf-8")
+        rounds.append(artifacts)
+    write_loop_manifest(
+        path=work_dir / "manifest.json",
+        repo=repo,
+        source="localization/en-us.lua",
+        output=work_dir / output,
+        work_dir=work_dir,
+        max_rounds=3,
+        completed_rounds=3,
+        stopped_reason="max_rounds",
+        rounds=rounds,
+        final_audit_summary={"needs_review": 2},
+        brief_path=work_dir / "mod_translation_brief.json",
+        brief_version="sha256:test",
+    )
+
+    def fail_if_called(**_kwargs):
+        raise AssertionError("completed max-rounds manifest should be reused")
+
+    monkeypatch.setattr("app.cli.main.translate_entry_preview_mod", fail_if_called)
+    monkeypatch.setattr("app.cli.main.apply_entry_preview", fail_if_called)
+    monkeypatch.setattr("app.cli.main.audit_entry_output", fail_if_called)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-loop",
+            "--repo",
+            str(repo),
+            "--source",
+            "localization/en-us.lua",
+            "--output",
+            str(output),
+            "--work-dir",
+            str(work_dir),
+            "--max-rounds",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert (repo / output).read_text(encoding="utf-8") == "-- round 2\n"
+    assert "resumed from existing artifacts" in result.output
 
 
 def test_translate_entry_loop_resolves_relative_work_dir_before_apply(

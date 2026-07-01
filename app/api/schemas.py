@@ -16,8 +16,9 @@ FeedbackType = Literal[
 FeedbackStatus = Literal["pending", "accepted", "rejected", "applied"]
 JobStatus = Literal["pending", "running", "succeeded", "failed", "cancelled"]
 ReviewStatus = Literal["pending", "approved", "rejected", "needs_changes"]
-LocalizationStatus = Literal["none", "partial", "complete"]
+LocalizationStatus = Literal["unknown", "none", "partial", "complete"]
 AiTranslationStatus = Literal[
+    "unknown",
     "skipped",
     "running",
     "translated_needs_review",
@@ -40,6 +41,9 @@ class DashboardResponse(BaseModel):
 class ModIndexItemOut(BaseModel):
     name: str
     repo_url: str | None
+    original_page_url: str | None
+    ai_translation_repo_url: str | None
+    ai_translation_branch_url: str | None = None
     stars: int
     categories: list[str]
     requires_steamodded: bool
@@ -49,6 +53,14 @@ class ModIndexItemOut(BaseModel):
     localization_progress: int
     ai_translation_status: AiTranslationStatus
     ai_translation_status_label: str
+    translation_available: bool
+    translation_mod_id: str | None
+    workflow_status: str
+    workflow_status_label: str
+    next_action: str
+    next_action_label: str
+    workflow_updated_at: str | None = None
+    cache_expires_at: str | None = None
     source_units: int
     zh_units: int
     missing_keys: int
@@ -97,6 +109,104 @@ class JobListResponse(BaseModel):
     items: list[JobOut]
 
 
+class JobEventOut(BaseModel):
+    id: int
+    job_id: int
+    level: str
+    event: str
+    message: str
+    payload: dict[str, Any]
+    created_at: str
+
+
+class JobEventListResponse(BaseModel):
+    items: list[JobEventOut]
+
+
+class AdminSettingsOut(BaseModel):
+    auto_translate_enabled: bool
+    auto_translate_interval_hours: int = Field(ge=1)
+    last_auto_translate_at: str | None = None
+
+
+class AdminSettingsUpdate(BaseModel):
+    auto_translate_enabled: bool | None = None
+    auto_translate_interval_hours: int | None = Field(default=None, ge=1)
+
+
+class TranslationQueueCreate(BaseModel):
+    mod_id: str = Field(min_length=1)
+    source_name: str | None = None
+    repo_url: str | None = None
+
+
+class TranslationQueueReorder(BaseModel):
+    direction: Literal["up", "down"]
+
+
+class TranslationQueueOut(BaseModel):
+    id: int
+    mod_id: str
+    source_name: str | None
+    repo_url: str | None
+    priority: int
+    status: str
+    locked_job_id: int | None
+    last_error: str | None
+    created_at: str
+    updated_at: str
+    started_at: str | None
+    finished_at: str | None
+
+
+class TranslationQueueListResponse(BaseModel):
+    items: list[TranslationQueueOut]
+
+
+class AdminModOut(BaseModel):
+    name: str
+    repo_url: str | None
+    translation_mod_id: str | None
+    translation_available: bool
+    localization_status: LocalizationStatus
+    localization_status_label: str
+    ai_translation_status: AiTranslationStatus
+    ai_translation_status_label: str
+    workflow_status: str
+    workflow_status_label: str
+    next_action: str
+    next_action_label: str
+    pending_review_items: int
+    approved_review_items: int
+    queue_status: str | None
+    queue_id: int | None
+    latest_job_status: str | None
+    fork_slug: str | None
+    latest_fork_branch_url: str | None
+
+
+class AdminModListResponse(BaseModel):
+    items: list[AdminModOut]
+
+
+class TranslationStart(BaseModel):
+    limit: int = Field(default=9999, ge=1)
+    top_k: int = Field(default=5, ge=1)
+    max_width: int = Field(default=25, ge=4)
+    concurrency: int | None = Field(default=None, ge=1)
+    max_rounds: int = Field(default=3, ge=1)
+    include_needs_review: bool = False
+    validate_lua: bool = True
+
+
+class GitHubProbeStart(BaseModel):
+    limit: int = Field(default=500, ge=1)
+    mod_name: str | None = None
+    repo_url: str | None = None
+    refresh_cache: bool = False
+    cache_ttl_seconds: int = Field(default=6 * 60 * 60, ge=0)
+
+
 class ReviewItemOut(BaseModel):
     id: int
     mod_id: str
@@ -112,6 +222,66 @@ class ReviewItemOut(BaseModel):
     created_at: str
     updated_at: str
     reviewed_at: str | None
+
+
+class ReviewModOut(BaseModel):
+    mod_id: str
+    pending_items: int
+    entry_groups: int
+    latest_updated_at: str | None
+
+
+class ReviewModListResponse(BaseModel):
+    items: list[ReviewModOut]
+
+
+class ReviewGroupItemOut(ReviewItemOut):
+    field: str
+
+
+class ReviewGroupOut(BaseModel):
+    mod_id: str
+    entry_key: str
+    item_count: int
+    status: ReviewStatus
+    latest_updated_at: str | None
+    items: list[ReviewGroupItemOut]
+
+
+class ReviewGroupListResponse(BaseModel):
+    items: list[ReviewGroupOut]
+    total: int = 0
+    page: int = 1
+    page_size: int = 100
+
+
+class ReviewGroupApprove(BaseModel):
+    item_ids: list[int] = Field(min_length=1)
+    edited_target_texts: dict[str, str] = Field(default_factory=dict)
+    reviewer: str | None = None
+    comment: str | None = None
+
+
+class ReviewGroupUpdateResponse(BaseModel):
+    updated: int
+    items: list[ReviewItemOut]
+
+
+class ApplyApprovedResponse(BaseModel):
+    mod_id: str
+    output: str
+    applied_items: int
+    applied_entries: int
+    applied_units: int
+
+
+class PublishForkResponse(BaseModel):
+    mod_id: str
+    repo_slug: str
+    branch: str
+    commit_sha: str
+    target_path: str
+    html_url: str
 
 
 class ReviewItemListResponse(BaseModel):

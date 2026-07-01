@@ -32,6 +32,7 @@
     precision highp float;
     uniform vec3 iResolution;
     uniform float iTime;
+    uniform vec2 iCenter;
 
     #define SPIN_ROTATION -2.0
     #define SPIN_SPEED 7.0
@@ -48,11 +49,12 @@
     vec4 effect(vec2 screenSize, vec2 screenCoords) {
       float pixelSize = length(screenSize.xy) / PIXEL_FILTER;
       vec2 uv = (floor(screenCoords.xy * (1.0 / pixelSize)) * pixelSize - 0.5 * screenSize.xy) / length(screenSize.xy) - OFFSET;
-      float uvLen = length(uv);
+      vec2 centerUv = (iCenter * screenSize.xy - 0.5 * screenSize.xy) / length(screenSize.xy) - OFFSET;
+      vec2 spinUv = uv - centerUv;
+      float uvLen = length(spinUv);
       float speed = SPIN_ROTATION * SPIN_EASE * 0.2 + 302.2;
-      float angle = atan(uv.y, uv.x) + speed - SPIN_EASE * 20.0 * (SPIN_AMOUNT * uvLen + (1.0 - SPIN_AMOUNT));
-      vec2 mid = (screenSize.xy / length(screenSize.xy)) / 2.0;
-      uv = vec2(uvLen * cos(angle) + mid.x, uvLen * sin(angle) + mid.y) - mid;
+      float angle = atan(spinUv.y, spinUv.x) + speed - SPIN_EASE * 20.0 * (SPIN_AMOUNT * uvLen + (1.0 - SPIN_AMOUNT));
+      uv = centerUv + vec2(uvLen * cos(angle), uvLen * sin(angle));
       uv *= 30.0;
       speed = iTime * SPIN_SPEED;
       vec2 uv2 = vec2(uv.x + uv.y);
@@ -116,8 +118,35 @@
   const positionLocation = gl.getAttribLocation(program, "aPosition");
   const resolutionLocation = gl.getUniformLocation(program, "iResolution");
   const timeLocation = gl.getUniformLocation(program, "iTime");
+  const centerLocation = gl.getUniformLocation(program, "iCenter");
   const start = performance.now();
+  let lastFrameTime = start;
   let frame = 0;
+  const center = { x: 0.5, y: 0.5 };
+  const targetCenter = { x: 0.5, y: 0.5 };
+
+  function clamp01(value) {
+    return Math.max(0, Math.min(1, value));
+  }
+
+  function setTargetCenterFromPointer(event) {
+    if (!enabled) return;
+    targetCenter.x = clamp01(event.clientX / Math.max(1, window.innerWidth));
+    targetCenter.y = clamp01(1 - event.clientY / Math.max(1, window.innerHeight));
+  }
+
+  function resetTargetCenter() {
+    targetCenter.x = 0.5;
+    targetCenter.y = 0.5;
+  }
+
+  function easeCenter(now) {
+    const deltaSeconds = Math.min(0.1, Math.max(0, (now - lastFrameTime) / 1000));
+    lastFrameTime = now;
+    const t = 1 - Math.exp(-deltaSeconds * 0.013);
+    center.x += (targetCenter.x - center.x) * t;
+    center.y += (targetCenter.y - center.y) * t;
+  }
 
   function resize() {
     const ratio = Math.min(window.devicePixelRatio || 1, 1.5);
@@ -137,12 +166,14 @@
     if (!visible || document.visibilityState !== "visible") return;
 
     resize();
+    easeCenter(now);
     gl.useProgram(program);
     gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
     gl.enableVertexAttribArray(positionLocation);
     gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
     gl.uniform3f(resolutionLocation, canvas.width, canvas.height, 1);
     gl.uniform1f(timeLocation, (now - start) / 1000);
+    gl.uniform2f(centerLocation, center.x, center.y);
     gl.drawArrays(gl.TRIANGLES, 0, 6);
     frame = requestAnimationFrame(draw);
   }
@@ -160,6 +191,9 @@
   });
 
   window.addEventListener("resize", () => draw(performance.now()));
+  window.addEventListener("pointermove", setTargetCenterFromPointer, { passive: true });
+  window.addEventListener("pointerleave", resetTargetCenter);
+  window.addEventListener("blur", resetTargetCenter);
   document.addEventListener("visibilitychange", () => draw(performance.now()));
   draw(performance.now());
 })();

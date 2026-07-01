@@ -1,9 +1,15 @@
+import os
+import time
+
+import httpx
+
 from app.github.no_clone_l10n_probe import (
     GitHubApi,
     LocaleFileAnalysis,
     RepoLocalizationAnalysis,
     canonical_repo_from_meta,
     classify_locale_pair,
+    load_index_items,
     summarize_repo_analysis,
 )
 
@@ -139,6 +145,93 @@ def test_github_api_follows_repository_redirects() -> None:
         client.close()
 
 
+def test_github_api_caches_get_responses_on_disk(tmp_path) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "full_name": "example/alpha",
+                "name": "alpha",
+                "default_branch": "main",
+            },
+        )
+
+    cache_dir = tmp_path / "github-cache"
+    client = GitHubApi(
+        "fake-token",
+        cache_dir=cache_dir,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert client.repo("example", "alpha")["full_name"] == "example/alpha"
+    finally:
+        client.close()
+
+    def fail_on_network(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"unexpected network request: {request.url}")
+
+    cached_client = GitHubApi(
+        "fake-token",
+        cache_dir=cache_dir,
+        transport=httpx.MockTransport(fail_on_network),
+    )
+    try:
+        assert cached_client.repo("example", "alpha")["default_branch"] == "main"
+    finally:
+        cached_client.close()
+
+    assert len(calls) == 1
+    assert list(cache_dir.glob("*.json"))
+
+
+def test_github_api_refreshes_expired_cached_get_response(tmp_path) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "full_name": "example/alpha",
+                "name": "alpha",
+                "default_branch": f"main-{calls}",
+            },
+        )
+
+    cache_dir = tmp_path / "github-cache"
+    client = GitHubApi(
+        "fake-token",
+        cache_dir=cache_dir,
+        cache_ttl_seconds=1,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert client.repo("example", "alpha")["default_branch"] == "main-1"
+    finally:
+        client.close()
+
+    cache_file = next(cache_dir.glob("*.json"))
+    stale = time.time() - 10
+    os.utime(cache_file, (stale, stale))
+
+    refreshed = GitHubApi(
+        "fake-token",
+        cache_dir=cache_dir,
+        cache_ttl_seconds=1,
+        transport=httpx.MockTransport(handler),
+    )
+    try:
+        assert refreshed.repo("example", "alpha")["default_branch"] == "main-2"
+    finally:
+        refreshed.close()
+
+    assert calls == 2
+
+
 def test_canonical_repo_from_meta_uses_redirected_full_name() -> None:
     owner, repo = canonical_repo_from_meta(
         {"full_name": "ActualOwner/ActualRepo", "name": "ActualRepo"},
@@ -148,3 +241,32 @@ def test_canonical_repo_from_meta_uses_redirected_full_name() -> None:
 
     assert owner == "ActualOwner"
     assert repo == "ActualRepo"
+
+
+def test_load_index_items_can_select_one_mod_by_name_or_repo_url(tmp_path) -> None:
+    index_path = tmp_path / "mods.json"
+    index_path.write_text(
+        """
+        [
+          {
+            "name": "Alpha Mod",
+            "github_repo_url": "https://github.com/example/alpha"
+          },
+          {
+            "name": "Balatro Draft",
+            "github_repo_url": "https://github.com/spire-winder/Balatro-Draft"
+          }
+        ]
+        """,
+        encoding="utf-8",
+    )
+
+    by_name = load_index_items(index_path, limit=500, mod_name="Balatro Draft")
+    by_repo = load_index_items(
+        index_path,
+        limit=500,
+        repo_url="https://github.com/spire-winder/Balatro-Draft",
+    )
+
+    assert [item["name"] for item in by_name] == ["Balatro Draft"]
+    assert [item["name"] for item in by_repo] == ["Balatro Draft"]

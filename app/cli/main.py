@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 import os
@@ -16,6 +18,7 @@ from rich.table import Table
 
 from app.config import load_settings
 from app.cli.translation_loop import (
+    LoopRoundArtifacts,
     audit_has_rerunnable_issues,
     default_loop_brief_path,
     default_loop_work_dir,
@@ -70,6 +73,28 @@ from app.rag.vector_sync import sync_vector_outbox
 
 app = typer.Typer(no_args_is_help=True)
 console = Console()
+TranslationProgressCallback = Callable[[str, str, dict[str, object]], None]
+_TRANSLATION_PROGRESS_CALLBACK: ContextVar[TranslationProgressCallback | None] = (
+    ContextVar("translation_progress_callback", default=None)
+)
+
+
+def set_translation_progress_callback(callback: TranslationProgressCallback | None):
+    return _TRANSLATION_PROGRESS_CALLBACK.set(callback)
+
+
+def reset_translation_progress_callback(token) -> None:
+    _TRANSLATION_PROGRESS_CALLBACK.reset(token)
+
+
+def _emit_translation_progress(
+    event: str,
+    message: str,
+    **payload: object,
+) -> None:
+    callback = _TRANSLATION_PROGRESS_CALLBACK.get()
+    if callback is not None:
+        callback(event, message, payload)
 _CREDIT_LINE_RE = re.compile(
     r"^\s*(Idea|Art|Code|Concept|Music|Sound|Credit|Credits)\s*:\s*.+$",
     re.IGNORECASE,
@@ -346,6 +371,128 @@ def merge_entry_preview(
     )
 
 
+def _loop_resume_state(
+    *,
+    manifest_path: Path,
+    repo: Path,
+    source: str,
+) -> tuple[dict[str, object], list[LoopRoundArtifacts]] | None:
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("source") != source:
+        return None
+    manifest_repo = payload.get("repo")
+    if isinstance(manifest_repo, str) and not _same_resolved_path(Path(manifest_repo), repo):
+        return None
+    raw_rounds = payload.get("rounds")
+    if not isinstance(raw_rounds, list):
+        return None
+    try:
+        completed = int(payload.get("completed_rounds") or len(raw_rounds))
+    except (TypeError, ValueError):
+        return None
+    rounds: list[LoopRoundArtifacts] = []
+    for raw_round in raw_rounds[:completed]:
+        if not isinstance(raw_round, dict):
+            return None
+        try:
+            round_index = int(raw_round.get("round_index", len(rounds)))
+        except (TypeError, ValueError):
+            return None
+        artifacts = LoopRoundArtifacts(
+            round_index=round_index,
+            preview=_manifest_path(raw_round.get("preview"), manifest_path.parent),
+            rerun=_manifest_path(raw_round.get("rerun"), manifest_path.parent),
+            target=_manifest_path(raw_round.get("target"), manifest_path.parent),
+            audit=_manifest_path(raw_round.get("audit"), manifest_path.parent),
+            rerun_keys=_manifest_path(raw_round.get("rerun_keys"), manifest_path.parent),
+        )
+        if not (
+            artifacts.preview.exists()
+            and artifacts.target.exists()
+            and artifacts.audit.exists()
+            and artifacts.rerun_keys.exists()
+        ):
+            return None
+        rounds.append(artifacts)
+    if not rounds:
+        return None
+    return payload, rounds
+
+
+def _manifest_path(value: object, base_dir: Path) -> Path:
+    if isinstance(value, str) and value:
+        path = Path(value)
+        return path if path.is_absolute() else base_dir / path
+    return base_dir / "__missing__"
+
+
+def _same_resolved_path(left: Path, right: Path) -> bool:
+    try:
+        return left.resolve() == right.resolve()
+    except OSError:
+        return left == right
+
+
+def _rerun_keys_empty(path: Path) -> bool:
+    try:
+        return not path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+
+
+def _complete_resumed_loop(
+    *,
+    repo: Path,
+    source: str,
+    final_output: Path,
+    manifest_path: Path,
+    resolved_work_dir: Path,
+    max_rounds: int,
+    rounds: list[LoopRoundArtifacts],
+    stopped_reason: str,
+    final_summary: dict[str, object] | None,
+    resolved_brief_path: Path,
+    current_brief_version: str,
+) -> None:
+    last_target = rounds[-1].target
+    final_output.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(last_target, final_output)
+    write_loop_manifest(
+        path=manifest_path,
+        repo=repo,
+        source=source,
+        output=final_output,
+        work_dir=resolved_work_dir,
+        max_rounds=max_rounds,
+        completed_rounds=len(rounds),
+        stopped_reason=stopped_reason,
+        rounds=rounds,
+        final_audit_summary=final_summary,
+        brief_path=resolved_brief_path,
+        brief_version=current_brief_version,
+    )
+    console.print(
+        "Translation loop resumed from existing artifacts: "
+        f"rounds={len(rounds)} stopped_reason={stopped_reason} "
+        f"output={final_output} manifest={manifest_path}"
+    )
+    _emit_translation_progress(
+        "translation.loop.resumed",
+        f"Reused {len(rounds)} completed translation round(s)",
+        rounds=len(rounds),
+        stopped_reason=stopped_reason,
+        output=str(final_output),
+        manifest=str(manifest_path),
+    )
+
+
 @app.command("translate-entry-loop")
 def translate_entry_loop(
     repo: Path = typer.Option(..., exists=True, file_okay=False),
@@ -379,19 +526,65 @@ def translate_entry_loop(
     previous_keys: Path | None = None
     final_summary: dict[str, object] | None = None
     stopped_reason = "max_rounds"
+    start_round = 0
+    resume_state = _loop_resume_state(
+        manifest_path=manifest_path,
+        repo=repo,
+        source=source,
+    )
+    if resume_state is not None:
+        resume_payload, resume_rounds = resume_state
+        rounds = list(resume_rounds)
+        start_round = len(rounds)
+        previous_preview = rounds[-1].preview
+        previous_keys = rounds[-1].rerun_keys
+        resume_summary = resume_payload.get("final_audit_summary")
+        final_summary = resume_summary if isinstance(resume_summary, dict) else None
+        stopped_reason = str(resume_payload.get("stopped_reason") or stopped_reason)
 
     console.print(
         "Entry translation loop: "
         f"repo={repo} source={source} output={final_output} "
         f"work_dir={resolved_work_dir} max_rounds={max_rounds} "
         f"limit={limit} top_k={top_k} max_width={max_width} "
-        f"concurrency={_llm_concurrency(concurrency)}"
+        f"concurrency={_llm_concurrency(concurrency)} "
+        f"resume_rounds={start_round}"
     )
 
-    for round_index in range(max_rounds):
+    if rounds and (
+        start_round >= max_rounds
+        or stopped_reason == "no_rerun_keys"
+        or (previous_keys is not None and _rerun_keys_empty(previous_keys))
+    ):
+        if start_round >= max_rounds:
+            stopped_reason = "max_rounds"
+        elif previous_keys is not None and _rerun_keys_empty(previous_keys):
+            stopped_reason = "no_rerun_keys"
+        _complete_resumed_loop(
+            repo=repo,
+            source=source,
+            final_output=final_output,
+            manifest_path=manifest_path,
+            resolved_work_dir=resolved_work_dir,
+            max_rounds=max_rounds,
+            rounds=rounds,
+            stopped_reason=stopped_reason,
+            final_summary=final_summary,
+            resolved_brief_path=resolved_brief_path,
+            current_brief_version=current_brief_version,
+        )
+        return
+
+    for round_index in range(start_round, max_rounds):
         artifacts = loop_round_artifacts(resolved_work_dir, round_index)
         rounds.append(artifacts)
         console.print(f"[loop round {round_index + 1}/{max_rounds}]")
+        _emit_translation_progress(
+            "translation.round.start",
+            f"Starting loop round {round_index + 1}/{max_rounds}",
+            round=round_index + 1,
+            max_rounds=max_rounds,
+        )
 
         if round_index == 0:
             translate_entry_preview_mod(
@@ -422,6 +615,12 @@ def translate_entry_loop(
                 context_preview=previous_preview,
                 brief=resolved_brief_path,
             )
+            _emit_translation_progress(
+                "translation.preview.merge.start",
+                f"Merging rerun preview for round {round_index + 1}",
+                round=round_index + 1,
+                max_rounds=max_rounds,
+            )
             merge_entry_preview(
                 base=previous_preview,
                 updates=artifacts.rerun,
@@ -430,6 +629,13 @@ def translate_entry_loop(
                 apply_consistency=True,
             )
 
+        _emit_translation_progress(
+            "translation.apply.start",
+            f"Applying preview for round {round_index + 1}",
+            round=round_index + 1,
+            max_rounds=max_rounds,
+            preview=str(artifacts.preview),
+        )
         apply_entry_preview(
             repo=repo,
             source=source,
@@ -438,6 +644,13 @@ def translate_entry_loop(
             include_needs_review=include_needs_review,
             table_level=True,
             validate_lua=validate_lua,
+        )
+        _emit_translation_progress(
+            "translation.audit.start",
+            f"Auditing round {round_index + 1}",
+            round=round_index + 1,
+            max_rounds=max_rounds,
+            target=str(artifacts.target),
         )
         audit_entry_output(
             repo=repo,
@@ -468,6 +681,14 @@ def translate_entry_loop(
             f"  loop audit keys={len(keys)} "
             f"rerunnable={audit_has_rerunnable_issues(report)} "
             f"rerun_keys={artifacts.rerun_keys}"
+        )
+        _emit_translation_progress(
+            "translation.audit.complete",
+            f"Audit complete for round {round_index + 1}: rerun keys={len(keys)}",
+            round=round_index + 1,
+            max_rounds=max_rounds,
+            rerun_keys=len(keys),
+            summary=final_summary or {},
         )
 
         write_loop_manifest(
@@ -516,6 +737,14 @@ def translate_entry_loop(
         "Translation loop complete: "
         f"rounds={len(rounds)} stopped_reason={stopped_reason} "
         f"output={final_output} manifest={manifest_path}"
+    )
+    _emit_translation_progress(
+        "translation.loop.complete",
+        f"Translation loop complete after {len(rounds)} round(s)",
+        rounds=len(rounds),
+        stopped_reason=stopped_reason,
+        output=str(final_output),
+        manifest=str(manifest_path),
     )
 
 
@@ -877,11 +1106,25 @@ def translate_entry_preview_mod(
         f"brief_version={brief_version} entry_filter={len(entry_filter) if entry_filter is not None else 0} "
         f"output={output}"
     )
+    _emit_translation_progress(
+        "translation.preview.start",
+        f"Preparing {len(entries)} entr{'y' if len(entries) == 1 else 'ies'} for translation",
+        total_entries=len(entries),
+        entry_filter=len(entry_filter) if entry_filter is not None else 0,
+        output=str(output),
+    )
 
     work_items: list[EntryWorkItem] = []
     for index, entry in enumerate(entries, start=1):
         body_text = _entry_translatable_body(entry)
         console.print(f"[{index}/{len(entries)}] {entry.entry_key}")
+        _emit_translation_progress(
+            "translation.entry.prepare",
+            f"Preparing references [{index}/{len(entries)}] {entry.entry_key}",
+            current=index,
+            total=len(entries),
+            entry_key=entry.entry_key,
+        )
         dense_refs = _retrieve_entry_dense_references(
             db_path=db_path,
             embedder=embedder,
@@ -913,6 +1156,18 @@ def translate_entry_preview_mod(
             f"loose={tier_counts['loose']} "
             f"style_refs={_style_reference_count(style_examples)} "
             f"credit_lines={len(_entry_credit_lines(entry))}"
+        )
+        _emit_translation_progress(
+            "translation.entry.queued",
+            f"Queued for LLM [{index}/{len(entries)}] {entry.entry_key}",
+            current=index,
+            total=len(entries),
+            entry_key=entry.entry_key,
+            refs=len(references),
+            locked_refs=tier_counts["locked"],
+            same_context_refs=tier_counts["same_context"],
+            loose_refs=tier_counts["loose"],
+            style_refs=_style_reference_count(style_examples),
         )
         work_items.append(
             EntryWorkItem(
@@ -957,9 +1212,25 @@ def translate_entry_preview_mod(
         f"failed={name_failures} seeded={len(seeded_names)} "
         f"context_rows={len(context_rows)}"
     )
+    _emit_translation_progress(
+        "translation.name_glossary.complete",
+        f"Prepared name glossary: {len(pretranslated_names)} entries",
+        total_entries=len(entries),
+        glossary_entries=len(pretranslated_names),
+        name_failures=name_failures,
+        seeded_names=len(seeded_names),
+    )
 
     stats = _empty_preview_stats()
     work_groups = _build_entry_work_groups(work_items)
+    completed_entries = 0
+    _emit_translation_progress(
+        "translation.llm.start",
+        f"Submitting {len(work_groups)} translation group(s) to LLM",
+        total_entries=len(entries),
+        groups=len(work_groups),
+        concurrency=llm_concurrency,
+    )
     with output.open("w", encoding="utf-8") as file:
         with ThreadPoolExecutor(max_workers=llm_concurrency) as executor:
             futures = {
@@ -977,11 +1248,19 @@ def translate_entry_preview_mod(
                 ): group
                 for group in work_groups
             }
+            _emit_translation_progress(
+                "translation.llm.waiting",
+                f"Waiting for LLM translations: {len(work_groups)} group(s)",
+                total_entries=len(entries),
+                groups=len(work_groups),
+                concurrency=llm_concurrency,
+            )
             rows_by_index: dict[int, dict[str, object]] = {}
             for future in as_completed(futures):
                 group = futures[future]
                 group_rows, group_logs = future.result()
                 for log_kind, item, row, exc in group_logs:
+                    completed_entries += 1
                     if log_kind == "done":
                         console.print(
                             f"  LLM done [{item.index}/{len(entries)}] "
@@ -991,10 +1270,28 @@ def translate_entry_preview_mod(
                             f"apply_mode={row.get('apply_mode')} "
                             f"{_preview_review_log(row)}"
                         )
+                        _emit_translation_progress(
+                            "translation.entry.done",
+                            f"Translated [{completed_entries}/{len(entries)}] {item.entry.entry_key}",
+                            current=completed_entries,
+                            total=len(entries),
+                            entry_key=item.entry.entry_key,
+                            ok=bool(row.get("ok")),
+                            needs_review=bool(row.get("needs_review")),
+                            apply_mode=str(row.get("apply_mode") or ""),
+                        )
                     else:
                         console.print(
                             f"  LLM failed [{item.index}/{len(entries)}] "
                             f"{item.entry.entry_key}: {exc}"
+                        )
+                        _emit_translation_progress(
+                            "translation.entry.failed",
+                            f"Translation failed [{completed_entries}/{len(entries)}] {item.entry.entry_key}: {exc}",
+                            current=completed_entries,
+                            total=len(entries),
+                            entry_key=item.entry.entry_key,
+                            error=str(exc),
                         )
                 rows_by_index.update(group_rows)
                 missing_indexes = [
@@ -1014,6 +1311,14 @@ def translate_entry_preview_mod(
 
     console.print(f"Wrote {len(ordered_rows)} entry translation preview rows to {output}")
     console.print(_preview_summary_log(stats))
+    _emit_translation_progress(
+        "translation.preview.written",
+        f"Wrote {len(ordered_rows)} preview rows",
+        total_entries=len(entries),
+        written=len(ordered_rows),
+        stats=stats,
+        output=str(output),
+    )
 
 
 def _read_preview_rows(path: Path) -> list[dict[str, object]]:
@@ -1933,6 +2238,14 @@ def _translate_mod_entry_names(
     if not name_items:
         return dict(seed_names), 0
 
+    _emit_translation_progress(
+        "translation.name_glossary.start",
+        f"Pretranslating names for {len(name_items)} entr{'y' if len(name_items) == 1 else 'ies'}",
+        total_entries=len(work_items),
+        total=len(name_items),
+        seeded_names=len(seed_names),
+    )
+
     def translate_name(item: EntryWorkItem) -> tuple[str, str | None]:
         client = client_factory()
         try:
@@ -1957,18 +2270,43 @@ def _translate_mod_entry_names(
 
     names: dict[str, str] = dict(seed_names)
     failures = 0
+    completed = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(translate_name, item) for item in name_items]
         for future in as_completed(futures):
+            completed += 1
             try:
                 entry_key, target_name = future.result()
             except Exception:
                 failures += 1
+                _emit_translation_progress(
+                    "translation.name.failed",
+                    f"Name pretranslation failed [{completed}/{len(name_items)}]",
+                    current=completed,
+                    total=len(name_items),
+                    failures=failures,
+                )
                 continue
             if target_name is None:
                 failures += 1
+                _emit_translation_progress(
+                    "translation.name.failed",
+                    f"Name pretranslation failed [{completed}/{len(name_items)}] {entry_key}",
+                    current=completed,
+                    total=len(name_items),
+                    entry_key=entry_key,
+                    failures=failures,
+                )
                 continue
             names[entry_key] = target_name
+            _emit_translation_progress(
+                "translation.name.done",
+                f"Name pretranslated [{completed}/{len(name_items)}] {entry_key}",
+                current=completed,
+                total=len(name_items),
+                entry_key=entry_key,
+                failures=failures,
+            )
     return names, failures
 
 
@@ -2415,6 +2753,11 @@ def _translate_entry_preview_row(
             close()
     ok = not translated.token_errors
     text = translated.text + credit_lines if ok else translated.text
+    text = _normalize_non_description_text_lines(
+        entry_key=entry.entry_key,
+        source_text=entry.text,
+        target_text=text,
+    )
     name = pretranslated_name if pretranslated_name is not None else translated.name
     patchable, patch_warnings = _entry_patchability(
         entry=entry,
@@ -2453,6 +2796,19 @@ def _translate_entry_preview_row(
         "review": review,
         "brief_version": brief_version,
     }
+
+
+def _normalize_non_description_text_lines(
+    *,
+    entry_key: str,
+    source_text: list[object],
+    target_text: list[str],
+) -> list[str]:
+    if entry_key.startswith("descriptions."):
+        return target_text
+    if len(source_text) == 1 and len(target_text) > 1:
+        return ["".join(part.strip() for part in target_text)]
+    return target_text
 
 
 def _entry_is_name_only(entry) -> bool:

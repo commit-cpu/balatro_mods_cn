@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Balatro CN</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260701-production-admin-queue" />
   </head>
   <body>
     <canvas id="background-shader" aria-hidden="true"></canvas>
@@ -52,6 +52,7 @@
               <span data-i18n="filters.l10nStatus">汉化状态</span>
               <select name="l10n_status">
                 <option value="" data-i18n="filters.all">全部</option>
+                <option value="unknown" data-i18n="l10n.unknownShort">未探测</option>
                 <option value="none" data-i18n="l10n.none">无汉化</option>
                 <option value="partial" data-i18n="l10n.partialShort">部分</option>
                 <option value="complete" data-i18n="l10n.complete">完全汉化</option>
@@ -61,6 +62,7 @@
               <span data-i18n="filters.aiStatus">AI 状态</span>
               <select name="ai_status">
                 <option value="" data-i18n="filters.all">全部</option>
+                <option value="unknown" data-i18n="ai.unknownShort">未探测</option>
                 <option value="skipped" data-i18n="ai.skippedShort">跳过</option>
                 <option value="running" data-i18n="ai.runningShort">进行中</option>
                 <option value="translated_needs_review" data-i18n="ai.reviewShort">待 review</option>
@@ -77,16 +79,29 @@
             <span>mods</span>
           </div>
           <div class="table-wrap">
-            <table>
+            <table class="mods-table">
+              <colgroup>
+                <col class="col-mod" />
+                <col class="col-stars" />
+                <col class="col-categories" />
+                <col class="col-requires" />
+                <col class="col-l10n" />
+                <col class="col-ai" />
+                <col class="col-workflow" />
+                <col class="col-link" />
+                <col class="col-link" />
+              </colgroup>
               <thead>
                 <tr>
                   <th data-i18n="table.mod">模组</th>
-                  <th data-i18n="table.repo">仓库</th>
                   <th data-i18n="table.stars">星标</th>
                   <th data-i18n="table.categories">分类</th>
                   <th data-i18n="table.requires">依赖</th>
                   <th data-i18n="table.l10n">当前汉化状态</th>
                   <th data-i18n="table.ai">AI 翻译状态</th>
+                  <th data-i18n="table.workflow">流程</th>
+                  <th data-i18n="table.originalPage">原版页面</th>
+                  <th data-i18n="table.aiRepo">AI 仓库</th>
                 </tr>
               </thead>
               <tbody id="mod-list"></tbody>
@@ -102,12 +117,41 @@
             <h1 data-i18n="admin.review">审核</h1>
             <span id="review-count">0 pending</span>
           </div>
+          <button type="button" id="review-back" hidden data-i18n="admin.back">返回模组</button>
           <select id="review-status">
             <option value="pending">pending</option>
             <option value="needs_changes">needs_changes</option>
             <option value="approved">approved</option>
             <option value="rejected">rejected</option>
           </select>
+        </div>
+        <div class="panel admin-settings">
+          <label>
+            <input id="auto-translate-enabled" type="checkbox" />
+            <span data-i18n="admin.autoTranslate">自动翻译</span>
+          </label>
+          <label>
+            <span data-i18n="admin.intervalHours">间隔小时</span>
+            <input id="auto-translate-hours" type="number" min="1" step="1" value="5" />
+          </label>
+          <button type="button" id="save-admin-settings" data-i18n="admin.saveSettings">保存设置</button>
+        </div>
+        <div class="panel admin-management">
+          <div class="admin-tabs" id="admin-mod-tabs"></div>
+          <div class="admin-mod-list" id="admin-mod-list"></div>
+        </div>
+        <div class="panel workflow-toolbar">
+          <label>
+            <span data-i18n="admin.pipelineMod">模组</span>
+            <input id="workflow-mod-search" type="search" autocomplete="off" data-i18n-placeholder="admin.modSearchPlaceholder" placeholder="搜索模组" />
+            <select id="workflow-mod"></select>
+          </label>
+          <button type="button" id="start-translation" data-i18n="admin.startTranslation">启动翻译</button>
+          <button type="button" id="apply-approved" data-i18n="admin.applyApproved">应用已通过</button>
+          <button type="button" id="publish-fork" data-i18n="admin.publishFork">提交到 Fork</button>
+          <button type="button" id="probe-github" data-i18n="admin.probeGithub">探测 GitHub</button>
+          <button type="button" id="verify-forks" data-i18n="admin.verifyForks">验证/创建 Fork</button>
+          <span id="workflow-status"></span>
         </div>
         <div class="review-list" id="review-list"></div>
         <div class="pager" id="review-pager"></div>
@@ -173,8 +217,8 @@
     </label>
 
     <script src="/static/joker-pixel-data.js"></script>
-    <script src="/static/balatro-background.js"></script>
+    <script src="/static/balatro-background.js?v=20260701-spin-center-slow"></script>
     <script src="/static/home-effects.js"></script>
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v=20260701-production-admin-queue"></script>
   </body>
 </html>

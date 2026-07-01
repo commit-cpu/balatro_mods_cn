@@ -4,6 +4,18 @@ import pytest
 from app.rag.ollama_embeddings import OllamaEmbeddingClient, OllamaEmbeddingError
 
 
+def test_default_ollama_client_ignores_proxy_environment(monkeypatch) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:7890")
+    monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:7890")
+
+    client = OllamaEmbeddingClient(
+        base_url="http://127.0.0.1:11434",
+        model="qwen3-embedding:8b",
+    )
+
+    assert client._client._trust_env is False
+
+
 def test_embed_texts_calls_ollama_embed_api() -> None:
     requests: list[httpx.Request] = []
 

@@ -19,7 +19,7 @@ class OllamaEmbeddingClient:
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._model = model
-        self._client = http_client or httpx.Client(timeout=timeout)
+        self._client = http_client or httpx.Client(timeout=timeout, trust_env=False)
 
     def embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not texts:

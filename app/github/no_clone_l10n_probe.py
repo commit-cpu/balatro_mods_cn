@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from dataclasses import dataclass, field
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -231,7 +232,19 @@ def summarize_repo_analysis(
 
 
 class GitHubApi:
-    def __init__(self, token: str, *, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        token: str,
+        *,
+        timeout: float = 30.0,
+        cache_dir: Path | str | None = None,
+        refresh_cache: bool = False,
+        cache_ttl_seconds: int | None = None,
+        transport: httpx.BaseTransport | None = None,
+    ) -> None:
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else None
+        self._refresh_cache = refresh_cache
+        self._cache_ttl_seconds = cache_ttl_seconds
         self._client = httpx.Client(
             base_url="https://api.github.com",
             headers={
@@ -242,6 +255,7 @@ class GitHubApi:
             },
             timeout=timeout,
             follow_redirects=True,
+            transport=transport,
         )
 
     def close(self) -> None:
@@ -325,6 +339,20 @@ class GitHubApi:
                 return False
             raise
 
+    def file_sha(self, owner: str, repo: str, path: str, ref: str) -> str | None:
+        encoded = _quote_path(path)
+        try:
+            data = self._get(
+                f"/repos/{owner}/{repo}/contents/{encoded}",
+                params={"ref": ref},
+            )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        sha = data.get("sha")
+        return sha if isinstance(sha, str) and sha else None
+
     def put_file(
         self,
         owner: str,
@@ -334,21 +362,40 @@ class GitHubApi:
         path: str,
         content: bytes,
         message: str,
+        sha: str | None = None,
     ) -> dict[str, Any]:
         encoded = _quote_path(path)
-        return self._put(
-            f"/repos/{owner}/{repo}/contents/{encoded}",
-            json={
-                "message": message,
-                "content": base64.b64encode(content).decode("ascii"),
-                "branch": branch,
-            },
-        )
+        payload = {
+            "message": message,
+            "content": base64.b64encode(content).decode("ascii"),
+            "branch": branch,
+        }
+        if sha is not None:
+            payload["sha"] = sha
+        return self._put(f"/repos/{owner}/{repo}/contents/{encoded}", json=payload)
 
     def _get(self, path: str, **kwargs: Any) -> dict[str, Any]:
+        cache_path = self._cache_path(path, kwargs)
+        if (
+            cache_path is not None
+            and not self._refresh_cache
+            and cache_path.exists()
+            and not self._cache_expired(cache_path)
+        ):
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(cached, dict):
+                return cached
+
         response = self._client.get(path, **kwargs)
         response.raise_for_status()
-        return response.json()
+        payload = response.json()
+        if cache_path is not None and isinstance(payload, dict):
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        return payload
 
     def _post(self, path: str, **kwargs: Any) -> dict[str, Any]:
         response = self._client.post(path, **kwargs)
@@ -359,6 +406,197 @@ class GitHubApi:
         response = self._client.put(path, **kwargs)
         response.raise_for_status()
         return response.json()
+
+    def _cache_path(self, path: str, kwargs: dict[str, Any]) -> Path | None:
+        if self._cache_dir is None:
+            return None
+        key = json.dumps(
+            {
+                "path": path,
+                "params": kwargs.get("params") or {},
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+        return self._cache_dir / f"{digest}.json"
+
+    def _cache_expired(self, path: Path) -> bool:
+        if self._cache_ttl_seconds is None:
+            return False
+        age = time.time() - path.stat().st_mtime
+        return age > self._cache_ttl_seconds
+
+
+def run_github_l10n_probe(
+    *,
+    token: str,
+    index_path: Path,
+    report_path: Path,
+    limit: int,
+    mod_name: str | None = None,
+    repo_url: str | None = None,
+    fork: bool = False,
+    create_empty_zh_once: bool = False,
+    branch: str = "codex-test-empty-zh-cn",
+    cache_dir: Path | None = None,
+    refresh_cache: bool = False,
+    cache_ttl_seconds: int | None = None,
+) -> dict[str, Any]:
+    items = load_index_items(
+        index_path,
+        limit,
+        mod_name=mod_name,
+        repo_url=repo_url,
+    )
+    client = GitHubApi(
+        token,
+        cache_dir=cache_dir,
+        refresh_cache=refresh_cache,
+        cache_ttl_seconds=cache_ttl_seconds,
+    )
+    report: dict[str, Any] = {
+        "index": str(index_path),
+        "limit": limit,
+        "items": [],
+        "test_commit": None,
+    }
+
+    try:
+        github_user = client.current_user()
+        report["github_user"] = github_user
+        did_test_commit = False
+
+        for index, item in enumerate(items, 1):
+            row = probe_index_item(
+                client=client,
+                github_user=github_user,
+                item=item,
+                index=index,
+                fork=fork,
+                create_empty_zh_once=create_empty_zh_once,
+                did_test_commit=did_test_commit,
+                branch=branch,
+            )
+            if row.get("test_commit"):
+                report["test_commit"] = row["test_commit"]
+                did_test_commit = True
+            report["items"].append(row)
+    finally:
+        client.close()
+
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return report
+
+
+def probe_index_item(
+    *,
+    client: GitHubApi,
+    github_user: str,
+    item: dict[str, Any],
+    index: int,
+    fork: bool,
+    create_empty_zh_once: bool,
+    did_test_commit: bool,
+    branch: str,
+) -> dict[str, Any]:
+    url = str(item.get("github_repo_url") or "")
+    name = str(item.get("name") or "")
+    row: dict[str, Any] = {
+        "index": index,
+        "name": name,
+        "url": url,
+        "upstream": "",
+        "canonical_upstream": "",
+        "fork": "",
+        "fork_status": "not_requested",
+        "analysis": {},
+        "error": None,
+    }
+    try:
+        owner, repo = parse_github_repo_url(url)
+        row["upstream"] = f"{owner}/{repo}"
+        row["fork"] = f"{github_user}/{repo}"
+
+        analysis, upstream_meta = analyze_repository_no_clone(
+            client=client,
+            owner=owner,
+            repo=repo,
+        )
+        canonical_owner, canonical_repo = canonical_repo_from_meta(
+            upstream_meta,
+            fallback_owner=owner,
+            fallback_repo=repo,
+        )
+        row["canonical_upstream"] = f"{canonical_owner}/{canonical_repo}"
+        row["fork"] = f"{github_user}/{canonical_repo}"
+        row["default_branch"] = str(upstream_meta.get("default_branch") or "main")
+        row["analysis"] = analysis.to_dict()
+
+        fork_meta: dict[str, Any] | None = None
+        if fork or (
+            create_empty_zh_once
+            and not did_test_commit
+            and analysis.status == "missing_zh_CN"
+            and analysis.details
+        ):
+            fork_meta, fork_status = client.ensure_fork(
+                canonical_owner,
+                canonical_repo,
+                github_user,
+            )
+            row["fork_status"] = fork_status
+
+        if (
+            create_empty_zh_once
+            and not did_test_commit
+            and fork_meta is not None
+            and analysis.status == "missing_zh_CN"
+            and analysis.details
+        ):
+            target_path = analysis.details[0].target_path
+            default_branch = str(
+                fork_meta.get("default_branch")
+                or upstream_meta.get("default_branch")
+                or "main"
+            )
+            existing = client.file_text(
+                github_user,
+                canonical_repo,
+                target_path,
+                branch,
+            )
+            if existing is None:
+                commit_info = create_empty_zh_file_once(
+                    client=client,
+                    fork_owner=github_user,
+                    repo=canonical_repo,
+                    default_branch=default_branch,
+                    target_path=target_path,
+                    branch=branch,
+                )
+                commit_info["upstream"] = row["upstream"]
+                commit_info["canonical_upstream"] = row["canonical_upstream"]
+                commit_info["created_file"] = True
+            else:
+                commit_info = {
+                    "repo": row["fork"],
+                    "upstream": row["upstream"],
+                    "canonical_upstream": row["canonical_upstream"],
+                    "branch": branch,
+                    "path": target_path,
+                    "created_file": False,
+                    "commit": None,
+                }
+            row["test_commit"] = commit_info
+    except Exception as exc:
+        row["error"] = str(exc)
+    return row
 
 
 def analyze_repository_no_clone(
@@ -457,11 +695,36 @@ def create_empty_zh_file_once(
     }
 
 
-def load_index_items(path: Path, limit: int) -> list[dict[str, Any]]:
+def load_index_items(
+    path: Path,
+    limit: int,
+    *,
+    mod_name: str | None = None,
+    repo_url: str | None = None,
+) -> list[dict[str, Any]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, list):
         raise ValueError(f"Expected a JSON array in {path}")
-    return [item for item in data[:limit] if isinstance(item, dict)]
+    items = [item for item in data if isinstance(item, dict)]
+    if repo_url:
+        repo_key = _normal_repo_url(repo_url)
+        items = [
+            item
+            for item in items
+            if _normal_repo_url(item.get("github_repo_url")) == repo_key
+        ]
+    elif mod_name:
+        name_key = mod_name.casefold()
+        items = [
+            item
+            for item in items
+            if str(item.get("name") or "").casefold() == name_key
+        ]
+    return items[:limit]
+
+
+def _normal_repo_url(value: Any) -> str:
+    return str(value or "").removesuffix("/").removesuffix(".git").casefold()
 
 
 def _extract_lua_units(text: str | None, label: str) -> tuple[dict[str, str], str | None]:
