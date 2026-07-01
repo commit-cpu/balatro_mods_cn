@@ -10,6 +10,7 @@ Balatro CN is a Python 3.12 application with these main parts:
 - Static single-page frontend in `app/api/static/`.
 - Typer CLI and translation loop in `app/cli/`.
 - SQLite persistence in `app/db/` and `migrations/`.
+- Public mod metadata from `data/repos/balatro-mod-index/mods/all.json`.
 - GitHub probing and publishing in `app/github/` and `app/api/*_workflow.py`.
 - Lua parsing/patching in `app/lua/`.
 - RAG and translation memory in `app/rag/`.
@@ -33,6 +34,23 @@ app factory:
 
 `app/api/repositories.py` is the main persistence layer. Route handlers should
 prefer repository methods instead of raw SQL.
+
+## Mod Index Source
+
+The default public mod index path is:
+
+```text
+data/repos/balatro-mod-index/mods/all.json
+```
+
+Clone it before running the app:
+
+```bash
+mkdir -p data/repos
+git clone https://github.com/PIPIKAI/balatro-mod-index.git data/repos/balatro-mod-index
+```
+
+Source file: <https://github.com/PIPIKAI/balatro-mod-index/blob/main/mods/all.json>.
 
 ## Admin Security
 

@@ -8,9 +8,14 @@ This guide covers running and using Balatro CN as a local or self-hosted admin.
 uv venv --python 3.12
 uv sync --extra dev
 cp .env.example .env
+mkdir -p data/repos
+git clone https://github.com/PIPIKAI/balatro-mod-index.git data/repos/balatro-mod-index
 docker compose up -d
 .venv/bin/python -m app.cli.main migrate
 ```
+
+The public mod list comes from `data/repos/balatro-mod-index/mods/all.json`.
+Clone source: <https://github.com/PIPIKAI/balatro-mod-index/blob/main/mods/all.json>.
 
 Configure `.env`:
 

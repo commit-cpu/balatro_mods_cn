@@ -73,9 +73,13 @@ Recommended runtime:
 uv venv --python 3.12
 uv sync --extra dev
 cp .env.example .env
+mkdir -p data/repos
+git clone https://github.com/PIPIKAI/balatro-mod-index.git data/repos/balatro-mod-index
 docker compose up -d
 .venv/bin/python -m app.cli.main migrate
 ```
+
+By default, the app reads the public mod index from `data/repos/balatro-mod-index/mods/all.json`. That file comes from [PIPIKAI/balatro-mod-index](https://github.com/PIPIKAI/balatro-mod-index/blob/main/mods/all.json).
 
 Start the API:
 
