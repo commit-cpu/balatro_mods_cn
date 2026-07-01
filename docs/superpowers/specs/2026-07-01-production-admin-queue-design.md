@@ -21,10 +21,10 @@ This design does not add upstream PR creation, multi-worker distributed locking,
 
 Two environment variables control admin access:
 
-- `ADMIN_PATH_SUFFIX`: the private path suffix. If set to `cnops`, the admin page lives at `/admin-cnops`.
-- `ADMIN_SECRET_KEY`: the secret key accepted once through `/admin-cnops?sk=<secret>`.
+- `ADMIN_PATH_SUFFIX`: the private path suffix. If set to `cnops`, the admin page lives at `/cnops`.
+- `ADMIN_SECRET_KEY`: the secret key accepted through the admin verification form.
 
-When the secret key is correct, the server returns the SPA and sets an HttpOnly cookie. Later admin navigation and protected API calls use that cookie. The secret key does not need to remain in the URL.
+When the secret key is correct, the server redirects back to the admin path and sets an HttpOnly cookie. Later admin navigation and protected API calls use that cookie. The secret key does not need to remain in the URL.
 
 The public SPA routes stay available:
 
@@ -59,8 +59,9 @@ The existing `/admin` route should no longer expose the admin page in production
 
 - If admin auth is disabled, `/admin` continues to work for development.
 - If admin auth is enabled, `/admin` returns 404.
-- `/admin-{ADMIN_PATH_SUFFIX}` is the only admin SPA route.
-- Client-side routing should detect both `/admin` and `/admin-...` as the admin page after the server has authorized it.
+- `/{ADMIN_PATH_SUFFIX}` is the only production admin route.
+- Before authorization, `/{ADMIN_PATH_SUFFIX}` shows a small `sk` form instead of the SPA.
+- Client-side routing should detect custom admin paths as the admin page after the server has authorized it.
 
 ## Data Model
 

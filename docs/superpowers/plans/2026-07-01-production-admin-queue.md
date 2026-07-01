@@ -499,12 +499,12 @@ def test_admin_route_requires_secret_when_enabled(monkeypatch, tmp_path: Path) -
     client = TestClient(create_app(db_path=db_path))
 
     assert client.get("/admin").status_code == 404
-    assert client.get("/admin-cnops").status_code == 401
+    assert client.get("/cnops").status_code == 401
 
-    response = client.get("/admin-cnops?sk=secret-value")
+    response = client.get("/cnops?sk=secret-value")
     assert response.status_code == 200
     assert "balatro_cn_admin" in response.headers.get("set-cookie", "")
-    assert client.get("/admin-cnops").status_code == 200
+    assert client.get("/cnops").status_code == 200
 
 
 def test_protected_api_rejects_without_admin_cookie(monkeypatch, tmp_path: Path) -> None:
@@ -555,7 +555,7 @@ def admin_path_suffix() -> str:
 
 def admin_route_path() -> str:
     suffix = admin_path_suffix()
-    return f"/admin-{suffix}" if suffix else "/admin"
+    return f"/{suffix}" if suffix else "/admin"
 
 
 def validate_admin_secret(value: str | None) -> None:
@@ -980,7 +980,7 @@ def test_admin_settings_and_queue_endpoints_require_cookie_then_work(monkeypatch
 
     assert client.get("/api/admin/settings").status_code == 401
 
-    client.get("/admin-cnops?sk=secret-value")
+    client.get("/cnops?sk=secret-value")
     settings = client.get("/api/admin/settings")
     assert settings.status_code == 200
     assert settings.json()["auto_translate_interval_hours"] == 5
@@ -1044,7 +1044,7 @@ def test_admin_mods_summary_includes_review_queue_and_fork_state(monkeypatch, tm
             probe_report_path=probe_report_path,
         )
     )
-    client.get("/admin-cnops?sk=secret-value")
+    client.get("/cnops?sk=secret-value")
     payload = client.get("/api/admin/mods").json()
     alpha = next(item for item in payload["items"] if item["name"] == "Alpha Mod")
 
@@ -1310,7 +1310,7 @@ Change:
 
 ```javascript
 function routeFromPath(pathname) {
-  if (pathname === "/admin" || pathname.startsWith("/admin-")) return "admin";
+  if (pathname === "/admin" || pathname.startsWith("/")) return "admin";
 ```
 
 Bump `app.js` and `styles.css` query strings in `index.html` to:
@@ -1396,7 +1396,7 @@ Set these environment variables before starting uvicorn:
 ADMIN_PATH_SUFFIX=cnops
 ADMIN_SECRET_KEY=replace_with_long_random_secret
 
-Then open `/admin-cnops?sk=replace_with_long_random_secret` once. The server sets an HttpOnly cookie and subsequent admin API calls use that cookie. Public pages and `/api/mod-index` remain readable without the cookie.
+Then open `/{ADMIN_PATH_SUFFIX}`. The server shows an sk form, then sets an HttpOnly cookie after verification. Public pages and `/api/mod-index` remain readable without the cookie.
 ```
 
 - [ ] **Step 2: Run Python compile checks**
