@@ -3,8 +3,11 @@
   const toggle = document.querySelector("#background-toggle");
   if (!canvas || !toggle) return;
 
-  const saved = localStorage.getItem("balatro-cn-bg");
-  let enabled = saved === null ? true : saved === "on";
+  const mobileMedia = window.matchMedia("(max-width: 760px)");
+  let saved = localStorage.getItem("balatro-cn-bg");
+  let hasSavedPreference = saved !== null;
+  const defaultEnabled = () => !mobileMedia.matches;
+  let enabled = hasSavedPreference ? saved === "on" : defaultEnabled();
   toggle.checked = enabled;
 
   const gl =
@@ -186,9 +189,23 @@
 
   toggle.addEventListener("change", () => {
     enabled = toggle.checked;
+    hasSavedPreference = true;
     localStorage.setItem("balatro-cn-bg", enabled ? "on" : "off");
     draw(performance.now());
   });
+
+  function syncViewportDefault() {
+    if (hasSavedPreference) return;
+    enabled = defaultEnabled();
+    toggle.checked = enabled;
+    draw(performance.now());
+  }
+
+  if (typeof mobileMedia.addEventListener === "function") {
+    mobileMedia.addEventListener("change", syncViewportDefault);
+  } else if (typeof mobileMedia.addListener === "function") {
+    mobileMedia.addListener(syncViewportDefault);
+  }
 
   window.addEventListener("resize", () => draw(performance.now()));
   window.addEventListener("pointermove", setTargetCenterFromPointer, { passive: true });

@@ -1181,6 +1181,10 @@ td a {
     overflow-x: visible;
   }
 
+  colgroup {
+    display: none;
+  }
+
   table,
   tbody,
   tr,
@@ -1188,6 +1192,11 @@ td a {
     display: block;
     min-width: 0;
     width: 100%;
+  }
+
+  .mods-table,
+  body:not(.is-admin) .mods-table {
+    min-width: 0;
   }
 
   thead {
@@ -1258,8 +1267,9 @@ td a {
 
   .background-toggle {
     bottom: 12px;
-    font-size: 18px;
+    font-size: 16px;
     left: 12px;
+    padding: 6px 8px;
   }
 
   .filters {
