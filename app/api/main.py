@@ -179,6 +179,16 @@ def create_app(
         set_admin_cookie(response)
         return response
 
+    @app.get("/api/session")
+    def session(request: Request) -> dict[str, bool]:
+        if not admin_auth_enabled():
+            return {"is_admin": True}
+        try:
+            validate_admin_secret(request.cookies.get(ADMIN_COOKIE_NAME))
+        except HTTPException:
+            return {"is_admin": False}
+        return {"is_admin": True}
+
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}

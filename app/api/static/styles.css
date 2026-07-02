@@ -630,6 +630,19 @@ table {
   table-layout: fixed;
 }
 
+body:not(.is-admin) .mods-table {
+  min-width: 940px;
+}
+
+body:not(.is-admin) col[data-admin-only] {
+  visibility: collapse;
+}
+
+body:not(.is-admin) th[data-admin-only],
+body:not(.is-admin) td[data-admin-only] {
+  display: none;
+}
+
 .mods-table .col-mod {
   width: 22%;
 }
@@ -1070,6 +1083,19 @@ td a {
   box-shadow:
     inset 3px 3px 0 rgba(9, 7, 13, 0.45),
     0 0 0 2px rgba(246, 196, 79, 0.22);
+}
+
+.review-reason {
+  color: var(--muted);
+  display: grid;
+  font-size: 15px;
+  gap: 4px;
+  line-height: 1.35;
+  margin-top: 8px;
+}
+
+.review-reason div:first-child {
+  color: var(--yellow);
 }
 
 .review-grid {

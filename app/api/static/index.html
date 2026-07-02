@@ -4,7 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Balatro CN</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260701-production-admin-queue" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260702-mods-admin-workflow" />
   </head>
   <body>
     <canvas id="background-shader" aria-hidden="true"></canvas>
@@ -59,15 +59,14 @@
               </select>
             </label>
             <label>
-              <span data-i18n="filters.aiStatus">AI 状态</span>
+              <span data-i18n="filters.aiStatus">AI 汉化</span>
               <select name="ai_status">
                 <option value="" data-i18n="filters.all">全部</option>
-                <option value="unknown" data-i18n="ai.unknownShort">未探测</option>
-                <option value="skipped" data-i18n="ai.skippedShort">跳过</option>
-                <option value="running" data-i18n="ai.runningShort">进行中</option>
-                <option value="translated_needs_review" data-i18n="ai.reviewShort">待 review</option>
-                <option value="complete" data-i18n="ai.completeShort">已完成</option>
-                <option value="merged_upstream" data-i18n="ai.mergedShort">已合并</option>
+                <option value="not_started" data-i18n="ai.notStartedShort">未开始</option>
+                <option value="running" data-i18n="ai.runningShort">汉化中</option>
+                <option value="translated_needs_review" data-i18n="ai.reviewShort">待审核</option>
+                <option value="complete" data-i18n="ai.completeShort">已汉化</option>
+                <option value="merged_upstream" data-i18n="ai.mergedShort">已发布</option>
               </select>
             </label>
           </form>
@@ -80,27 +79,25 @@
           </div>
           <div class="table-wrap">
             <table class="mods-table">
-              <colgroup>
+              <colgroup id="mods-colgroup">
                 <col class="col-mod" />
                 <col class="col-stars" />
                 <col class="col-categories" />
                 <col class="col-requires" />
                 <col class="col-l10n" />
                 <col class="col-ai" />
-                <col class="col-workflow" />
                 <col class="col-link" />
                 <col class="col-link" />
               </colgroup>
               <thead>
-                <tr>
+                <tr id="mods-head-row">
                   <th data-i18n="table.mod">模组</th>
                   <th data-i18n="table.stars">星标</th>
                   <th data-i18n="table.categories">分类</th>
                   <th data-i18n="table.requires">依赖</th>
                   <th data-i18n="table.l10n">当前汉化状态</th>
-                  <th data-i18n="table.ai">AI 翻译状态</th>
-                  <th data-i18n="table.workflow">流程</th>
-                  <th data-i18n="table.originalPage">原版页面</th>
+                  <th data-i18n="table.ai">AI 汉化状态</th>
+                  <th data-i18n="table.originalPage">原始仓库</th>
                   <th data-i18n="table.aiRepo">AI 仓库</th>
                 </tr>
               </thead>
@@ -219,6 +216,6 @@
     <script src="/static/joker-pixel-data.js"></script>
     <script src="/static/balatro-background.js?v=20260701-spin-center-slow"></script>
     <script src="/static/home-effects.js"></script>
-    <script src="/static/app.js?v=20260702-job-progress-events"></script>
+    <script src="/static/app.js?v=20260702-mods-admin-workflow"></script>
   </body>
 </html>

@@ -8,18 +8,18 @@ const I18N = {
     "filters.category": "分类",
     "filters.all": "全部",
     "filters.l10nStatus": "汉化状态",
-    "filters.aiStatus": "AI 状态",
+    "filters.aiStatus": "AI 汉化",
     "table.mod": "模组",
     "table.repo": "仓库",
     "table.stars": "星标",
     "table.categories": "分类",
     "table.requires": "依赖",
     "table.l10n": "当前汉化状态",
-    "table.ai": "AI 翻译状态",
+    "table.ai": "AI 汉化状态",
     "table.workflow": "流程",
-    "table.originalPage": "原版页面",
+    "table.originalPage": "原始仓库",
     "table.aiRepo": "AI 翻译仓库",
-    "table.openOriginal": "原版",
+    "table.openOriginal": "仓库",
     "table.openAiRepo": "AI 仓库",
     "table.noLink": "无链接",
     "table.notReady": "未创建",
@@ -33,18 +33,20 @@ const I18N = {
     "l10n.none": "无汉化",
     "l10n.partialShort": "部分",
     "l10n.complete": "完全汉化",
-    "ai.unknown": "未探测",
-    "ai.unknownShort": "未探测",
-    "ai.skippedShort": "跳过",
-    "ai.runningShort": "进行中",
-    "ai.reviewShort": "待 review",
-    "ai.completeShort": "已完成",
-    "ai.mergedShort": "已合并",
-    "ai.skipped": "跳过",
-    "ai.running": "正在汉化",
-    "ai.translated_needs_review": "已经汉化（未review）",
-    "ai.complete": "完全汉化",
-    "ai.merged_upstream": "完全汉化并且 merge到官方仓库",
+    "ai.not_started": "未开始",
+    "ai.notStartedShort": "未开始",
+    "ai.unknown": "未开始",
+    "ai.unknownShort": "未开始",
+    "ai.skippedShort": "未开始",
+    "ai.runningShort": "汉化中",
+    "ai.reviewShort": "待审核",
+    "ai.completeShort": "已汉化",
+    "ai.mergedShort": "已发布",
+    "ai.skipped": "未开始",
+    "ai.running": "汉化中",
+    "ai.translated_needs_review": "待审核",
+    "ai.complete": "已汉化",
+    "ai.merged_upstream": "已发布",
     "deps.steamodded": "Steamodded",
     "deps.talisman": "Talisman",
     "deps.none": "无",
@@ -131,18 +133,18 @@ const I18N = {
     "filters.category": "Category",
     "filters.all": "All",
     "filters.l10nStatus": "Localization",
-    "filters.aiStatus": "AI status",
+    "filters.aiStatus": "AI localization",
     "table.mod": "Mod",
     "table.repo": "Repository",
     "table.stars": "Stars",
     "table.categories": "Categories",
     "table.requires": "Requires",
     "table.l10n": "Localization",
-    "table.ai": "AI translation",
+    "table.ai": "AI localization",
     "table.workflow": "Workflow",
-    "table.originalPage": "Original",
+    "table.originalPage": "Original repo",
     "table.aiRepo": "AI translation repo",
-    "table.openOriginal": "Original",
+    "table.openOriginal": "Repo",
     "table.openAiRepo": "AI repo",
     "table.noLink": "No link",
     "table.notReady": "Not created",
@@ -156,18 +158,20 @@ const I18N = {
     "l10n.none": "No Chinese",
     "l10n.partialShort": "Partial",
     "l10n.complete": "Complete",
-    "ai.unknown": "Unprobed",
-    "ai.unknownShort": "Unprobed",
-    "ai.skippedShort": "Skipped",
-    "ai.runningShort": "Running",
+    "ai.not_started": "Not started",
+    "ai.notStartedShort": "Not started",
+    "ai.unknown": "Not started",
+    "ai.unknownShort": "Not started",
+    "ai.skippedShort": "Not started",
+    "ai.runningShort": "Translating",
     "ai.reviewShort": "Review",
-    "ai.completeShort": "Complete",
-    "ai.mergedShort": "Merged",
-    "ai.skipped": "Skipped",
+    "ai.completeShort": "Translated",
+    "ai.mergedShort": "Published",
+    "ai.skipped": "Not started",
     "ai.running": "Translating",
-    "ai.translated_needs_review": "Translated, needs review",
-    "ai.complete": "Complete",
-    "ai.merged_upstream": "Complete and merged upstream",
+    "ai.translated_needs_review": "Review",
+    "ai.complete": "Translated",
+    "ai.merged_upstream": "Published",
     "deps.steamodded": "Steamodded",
     "deps.talisman": "Talisman",
     "deps.none": "None",
@@ -324,9 +328,28 @@ const JOB_EVENT_LABELS = {
   },
 };
 
+const REVIEW_REASON_LABELS = {
+  zh: {
+    translation_failed: "翻译失败",
+    ai_translation_blocked: "无法自动应用",
+    ai_translation_needs_review: "需要人工审核",
+    ai_translation_review: "AI 翻译建议",
+  },
+  en: {
+    translation_failed: "Translation failed",
+    ai_translation_blocked: "Cannot auto-apply",
+    ai_translation_needs_review: "Needs human review",
+    ai_translation_review: "AI suggestion",
+  },
+};
+
 const state = {
   route: "home",
   lang: localStorage.getItem("balatro-cn-lang") || "zh",
+  auth: {
+    checked: false,
+    isAdmin: false,
+  },
   mods: {
     page: 1,
     pageSize: 50,
@@ -396,6 +419,22 @@ function applyLanguage() {
   });
 }
 
+async function refreshSession() {
+  const response = await fetch("/api/session", {
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!response.ok) {
+    state.auth.checked = true;
+    state.auth.isAdmin = false;
+    document.body.classList.remove("is-admin");
+    return;
+  }
+  const payload = await response.json();
+  state.auth.checked = true;
+  state.auth.isAdmin = Boolean(payload.is_admin);
+  document.body.classList.toggle("is-admin", state.auth.isAdmin);
+}
+
 function setRoute(route, push = true) {
   state.route = route;
   document.body.dataset.route = route;
@@ -425,6 +464,7 @@ function formatDate(value) {
 }
 
 function l10nLabel(item) {
+  if (Number(item.localization_progress || 0) >= 100) return t("l10n.complete");
   if (item.localization_status === "partial") {
     return state.lang === "zh"
       ? `汉化部分（${item.localization_progress}%）`
@@ -433,6 +473,12 @@ function l10nLabel(item) {
   if (item.localization_status === "unknown") return t("l10n.unknown");
   if (item.localization_status === "complete") return t("l10n.complete");
   return t("l10n.none");
+}
+
+function l10nPillStatus(item) {
+  return Number(item.localization_progress || 0) >= 100
+    ? "complete"
+    : item.localization_status;
 }
 
 function aiLabel(item) {
@@ -516,10 +562,55 @@ function renderCategoryOptions(categories) {
   select.value = categories.includes(current) ? current : "";
 }
 
+function renderModsTableChrome() {
+  const cols = [
+    "col-mod",
+    "col-stars",
+    "col-categories",
+    "col-requires",
+    "col-l10n",
+    "col-ai",
+    ...(state.auth.isAdmin ? ["col-workflow"] : []),
+    "col-link",
+    "col-link",
+  ];
+  const headers = [
+    ["table.mod", ""],
+    ["table.stars", ""],
+    ["table.categories", ""],
+    ["table.requires", ""],
+    ["table.l10n", ""],
+    ["table.ai", ""],
+    ...(state.auth.isAdmin ? [["table.workflow", "data-admin-only"]] : []),
+    ["table.originalPage", ""],
+    ["table.aiRepo", ""],
+  ];
+  document.querySelector("#mods-colgroup").innerHTML = cols
+    .map((className) => `<col class="${className}" />`)
+    .join("");
+  document.querySelector("#mods-head-row").innerHTML = headers
+    .map(
+      ([key, attrs]) =>
+        `<th ${attrs} data-i18n="${key}">${escapeHtml(t(key))}</th>`,
+    )
+    .join("");
+}
+
 function renderMods(payload) {
   state.mods.total = payload.total;
   renderCategoryOptions(payload.categories);
+  renderModsTableChrome();
   document.querySelector("#mod-count").textContent = payload.total;
+  const workflowCell = (item) =>
+    state.auth.isAdmin
+      ? `
+            <td data-admin-only data-label="${escapeHtml(t("table.workflow"))}">
+              <span class="workflow-pill ${escapeHtml(item.workflow_status || "unprobed")}">
+                ${escapeHtml(workflowLabel(item))}
+              </span>
+            </td>`
+      : "";
+  const emptyColspan = state.auth.isAdmin ? 9 : 8;
   document.querySelector("#mod-list").innerHTML =
     payload.items
       .map(
@@ -536,7 +627,7 @@ function renderMods(payload) {
               <div class="tag-row">${dependencyTags(item)}</div>
             </td>
             <td data-label="${escapeHtml(t("table.l10n"))}">
-              <span class="status-pill ${escapeHtml(item.localization_status)}">
+              <span class="status-pill ${escapeHtml(l10nPillStatus(item))}">
                 ${escapeHtml(l10nLabel(item))}
               </span>
             </td>
@@ -545,11 +636,7 @@ function renderMods(payload) {
                 ${escapeHtml(aiLabel(item))}
               </span>
             </td>
-            <td data-label="${escapeHtml(t("table.workflow"))}">
-              <span class="workflow-pill ${escapeHtml(item.workflow_status || "unprobed")}">
-                ${escapeHtml(workflowLabel(item))}
-              </span>
-            </td>
+            ${workflowCell(item)}
             <td data-label="${escapeHtml(t("table.originalPage"))}">
               ${pageButton(item.original_page_url || item.repo_url, t("table.openOriginal"), t("table.noLink"))}
             </td>
@@ -559,11 +646,12 @@ function renderMods(payload) {
           </tr>
         `,
       )
-      .join("") || `<tr><td colspan="9" class="empty">${t("empty.mods")}</td></tr>`;
+      .join("") || `<tr><td colspan="${emptyColspan}" class="empty">${t("empty.mods")}</td></tr>`;
   renderPager("#mod-pager", state.mods.page, state.mods.pageSize, payload.total, "mods");
 }
 
 async function loadMods() {
+  await refreshSession();
   renderMods(await api(`/api/mod-index?${filterParams().toString()}`));
 }
 
@@ -645,6 +733,7 @@ function renderReviewGroups(payload) {
                             item.current_target_text ||
                             "",
                         )}</textarea>
+                        ${renderReviewReason(item.reason)}
                       </div>
                     </section>
                   `,
@@ -669,6 +758,23 @@ function renderReviewGroups(payload) {
     payload.total,
     "reviews",
   );
+}
+
+function renderReviewReason(reason) {
+  const lines = String(reason || "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (!lines.length) return "";
+  return `
+    <div class="review-reason">
+      ${lines.map((line) => `<div>${escapeHtml(reviewReasonText(line))}</div>`).join("")}
+    </div>
+  `;
+}
+
+function reviewReasonText(line) {
+  return REVIEW_REASON_LABELS[state.lang]?.[line] || line;
 }
 
 async function loadReviews() {

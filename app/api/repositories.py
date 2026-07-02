@@ -16,12 +16,12 @@ DEFAULT_PROBE_REPORT_PATH = Path("data/artifacts/github_no_clone_l10n_probe/repo
 DEFAULT_GITHUB_CACHE_TTL_SECONDS = 6 * 60 * 60
 _SKIPPED_PROBE_STATUSES = {"no_localization_dir", "no_source_files", None}
 _AI_STATUS_LABELS = {
-    "unknown": "未探测",
-    "skipped": "跳过",
-    "running": "正在汉化",
-    "translated_needs_review": "已经汉化（未review）",
-    "complete": "完全汉化",
-    "merged_upstream": "完全汉化并且 merge到官方仓库",
+    "unknown": "未开始",
+    "skipped": "未开始",
+    "running": "汉化中",
+    "translated_needs_review": "待审核",
+    "complete": "已汉化",
+    "merged_upstream": "已发布",
 }
 _WORKFLOW_STATUS_LABELS = {
     "unprobed": "未探测",
@@ -139,13 +139,16 @@ class ApiRepository:
             filtered = [
                 item
                 for item in filtered
-                if item["localization_status"] == localization_status
+                if _localization_filter_matches(item, localization_status)
             ]
         if ai_status:
+            ai_statuses = (
+                {"unknown", "skipped"} if ai_status == "not_started" else {ai_status}
+            )
             filtered = [
                 item
                 for item in filtered
-                if item["ai_translation_status"] == ai_status
+                if item["ai_translation_status"] in ai_statuses
             ]
         total = len(filtered)
         start = (page - 1) * page_size
@@ -1649,13 +1652,23 @@ def _localization_status(
 
 
 def _localization_label(status: str, progress: int) -> str:
-    if status == "complete":
+    if status == "complete" or progress >= 100:
         return "完全汉化"
     if status == "partial":
         return f"汉化部分（{progress}%）"
     if status == "unknown":
         return "未探测"
     return "无汉化"
+
+
+def _localization_filter_matches(item: dict[str, Any], status: str) -> bool:
+    progress = _as_int(item.get("localization_progress"))
+    item_status = item.get("localization_status")
+    if status == "partial":
+        return item_status == "partial" and progress < 100
+    if status == "complete":
+        return item_status == "complete" or progress >= 100
+    return item_status == status
 
 
 def _job_mod_id(payload_json: str | None) -> str | None:

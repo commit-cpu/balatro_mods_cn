@@ -334,13 +334,60 @@ def _preview_rows_to_review_items(
 
 
 def _review_reason(row: dict[str, Any]) -> str:
+    details = _review_reason_details(row)
     if row.get("ok") is not True:
-        return "translation_failed"
-    if _preview_row_is_blocked(row):
-        return "ai_translation_blocked"
-    if row.get("needs_review"):
-        return "ai_translation_needs_review"
-    return "ai_translation_review"
+        reason = "translation_failed"
+    elif _preview_row_is_blocked(row):
+        reason = "ai_translation_blocked"
+    elif row.get("needs_review"):
+        reason = "ai_translation_needs_review"
+    else:
+        reason = "ai_translation_review"
+    if details:
+        return reason + "\n" + "\n".join(details)
+    return reason
+
+
+def _review_reason_details(row: dict[str, Any]) -> list[str]:
+    details: list[str] = []
+    details.extend(_warning_lines(row, "patch_warnings"))
+    details.extend(_warning_lines(row, "apply_warnings"))
+    review = row.get("review")
+    if isinstance(review, dict):
+        details.extend(_review_message_lines(review, "term_violations"))
+        details.extend(_review_message_lines(review, "consistency_warnings"))
+        details.extend(_review_message_lines(review, "naturalness_warnings"))
+        details.extend(_review_message_lines(review, "meaning_warnings"))
+        rewrite_hint = review.get("rewrite_hint")
+        if isinstance(rewrite_hint, str) and rewrite_hint.strip():
+            details.append(f"rewrite_hint: {rewrite_hint.strip()}")
+    return details
+
+
+def _warning_lines(row: dict[str, Any], key: str) -> list[str]:
+    warnings = row.get(key)
+    if not isinstance(warnings, list):
+        return []
+    return [
+        f"{key}: {warning}"
+        for warning in warnings
+        if isinstance(warning, str) and warning.strip()
+    ]
+
+
+def _review_message_lines(review: dict[str, Any], key: str) -> list[str]:
+    values = review.get(key)
+    if not isinstance(values, list):
+        return []
+    lines: list[str] = []
+    for value in values:
+        if isinstance(value, dict):
+            message = value.get("message")
+            if isinstance(message, str) and message.strip():
+                lines.append(f"{key}: {message.strip()}")
+        elif isinstance(value, str) and value.strip():
+            lines.append(f"{key}: {value.strip()}")
+    return lines
 
 
 def _preview_row_is_blocked(row: dict[str, Any]) -> bool:

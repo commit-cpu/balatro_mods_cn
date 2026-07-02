@@ -259,6 +259,30 @@ def test_protected_api_rejects_without_admin_cookie(monkeypatch, tmp_path: Path)
     }
 
 
+def test_session_reports_admin_cookie_without_requiring_auth(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from app.api.admin_auth import ADMIN_COOKIE_NAME
+
+    monkeypatch.setenv("ADMIN_PATH_SUFFIX", "cnops")
+    monkeypatch.setenv("ADMIN_SECRET_KEY", "secret-value")
+    db_path = tmp_path / "balatro_cn.db"
+    migrate(db_path)
+    client = TestClient(create_app(db_path=db_path))
+
+    anonymous = client.get("/api/session")
+    assert anonymous.status_code == 200
+    assert anonymous.json() == {"is_admin": False}
+
+    admin = client.get(
+        "/api/session",
+        cookies={ADMIN_COOKIE_NAME: "secret-value"},
+    )
+    assert admin.status_code == 200
+    assert admin.json() == {"is_admin": True}
+
+
 def test_admin_auth_reads_dotenv_without_export(monkeypatch, tmp_path: Path) -> None:
     from app.api.admin_auth import admin_auth_enabled, admin_route_path
 
@@ -1200,8 +1224,86 @@ def test_translation_preview_import_queues_blocked_rows_for_review(
         "source_text": "Economy Jokers, Gold Seal and Lucky Card are banned",
         "suggested_target_text": "经济小丑、金色蜡封和幸运牌被禁用",
         "status": "pending",
-        "reason": "ai_translation_blocked",
+        "reason": (
+            "ai_translation_blocked\n"
+            "patch_warnings: text line count mismatch: source=1, target=3"
+        ),
     }
+
+
+def test_translation_preview_import_includes_review_reason_details(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "balatro_cn.db"
+    work_dir = tmp_path / "artifacts" / "familiar_entry_translate_loop"
+    work_dir.mkdir(parents=True)
+    preview = work_dir / "round_00_preview.jsonl"
+    preview.write_text(
+        json.dumps(
+            {
+                "entry_key": "descriptions.Other.demo_tooltip",
+                "ok": True,
+                "needs_review": True,
+                "apply_mode": "unit",
+                "patchable": True,
+                "patch_warnings": [],
+                "apply_warnings": [],
+                "target_units": {
+                    "name": "descriptions.Other.demo_tooltip.name",
+                    "text": ["descriptions.Other.demo_tooltip.text[0]"],
+                    "unlock": [],
+                },
+                "name": "演示提示",
+                "text": ["所有{C:attention}盲注{}"],
+                "unlock": [],
+                "source": {
+                    "name": "Demo Tooltip",
+                    "text": ["All {C:attention}Blinds{}"],
+                    "unlock": [],
+                },
+                "review": {
+                    "term_violations": [
+                        {
+                            "message": "[text] styled term 'Blinds' should translate to '盲注集合'",
+                        }
+                    ],
+                    "naturalness_warnings": ["语序偏硬"],
+                    "meaning_warnings": [],
+                    "consistency_warnings": ["same source translated differently"],
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (work_dir / "manifest.json").write_text(
+        json.dumps({"rounds": [{"round_index": 0, "preview": str(preview)}]}),
+        encoding="utf-8",
+    )
+    migrate(db_path)
+
+    imported = import_latest_preview_review_items(
+        db_path=db_path,
+        mod_id="familiar",
+        work_dir=work_dir,
+    )
+
+    assert imported == 2
+    with connect(db_path) as db:
+        row = db.execute(
+            """
+            select reason
+            from review_items
+            where unit_key = 'descriptions.Other.demo_tooltip.text[0]'
+            """
+        ).fetchone()
+    assert row["reason"] == (
+        "ai_translation_needs_review\n"
+        "term_violations: [text] styled term 'Blinds' should translate to '盲注集合'\n"
+        "consistency_warnings: same source translated differently\n"
+        "naturalness_warnings: 语序偏硬"
+    )
 
 
 def test_translation_preview_import_preserves_approved_review_items(
@@ -1523,6 +1625,20 @@ def test_static_frontend_is_served(tmp_path: Path) -> None:
     assert 'id="language-select"' in response.text
 
 
+def test_static_mods_table_uses_original_repo_label() -> None:
+    html = Path("app/api/static/index.html").read_text(encoding="utf-8")
+    app_js = Path("app/api/static/app.js").read_text(encoding="utf-8")
+
+    assert "原始仓库" in html
+    assert "原版页面" not in html
+    assert "原始仓库" in app_js
+    assert "原版页面" not in app_js
+    assert 'id="mods-colgroup"' in html
+    assert 'id="mods-head-row"' in html
+    assert 'col-workflow' not in html
+    assert 'data-i18n="table.workflow">流程' not in html
+
+
 def test_dashboard_and_mod_index_use_balatro_mod_index_data(tmp_path: Path) -> None:
     db_path = tmp_path / "balatro_cn.db"
     index_path = tmp_path / "all.json"
@@ -1574,11 +1690,18 @@ def test_dashboard_and_mod_index_use_balatro_mod_index_data(tmp_path: Path) -> N
     assert payload["items"][0]["localization_status"] == "partial"
     assert payload["items"][0]["localization_status_label"] == "汉化部分（90%）"
     assert payload["items"][0]["ai_translation_status"] == "translated_needs_review"
-    assert payload["items"][0]["ai_translation_status_label"] == "已经汉化（未review）"
+    assert payload["items"][0]["ai_translation_status_label"] == "待审核"
 
     skipped = client.get("/api/mod-index?ai_status=skipped")
     assert skipped.status_code == 200
     assert skipped.json()["items"][0]["name"] == "Beta Utility"
+
+    not_started = client.get("/api/mod-index?ai_status=not_started&page=1&page_size=10")
+    assert not_started.status_code == 200
+    assert [item["name"] for item in not_started.json()["items"]] == [
+        "Beta Utility",
+        "Gamma Unprobed",
+    ]
 
     unprobed = client.get("/api/mod-index?q=gamma&page=1&page_size=10")
     assert unprobed.status_code == 200
@@ -1586,4 +1709,54 @@ def test_dashboard_and_mod_index_use_balatro_mod_index_data(tmp_path: Path) -> N
     assert unprobed_item["localization_status"] == "unknown"
     assert unprobed_item["localization_status_label"] == "未探测"
     assert unprobed_item["ai_translation_status"] == "unknown"
-    assert unprobed_item["ai_translation_status_label"] == "未探测"
+    assert unprobed_item["ai_translation_status_label"] == "未开始"
+
+
+def test_mod_index_labels_partial_full_progress_as_complete(tmp_path: Path) -> None:
+    db_path = tmp_path / "balatro_cn.db"
+    index_path = tmp_path / "all.json"
+    report_path = tmp_path / "report.json"
+    migrate(db_path)
+    _write_mod_index(index_path)
+    report_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "name": "Alpha Mod",
+                        "url": "https://github.com/example/alpha",
+                        "analysis": {
+                            "status": "missing_keys",
+                            "summary": {
+                                "source_units": 10,
+                                "zh_units": 10,
+                                "missing_keys": 1,
+                                "extra_keys": 0,
+                                "untranslated_keys": 0,
+                                "residual_english": 0,
+                            },
+                        },
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    repo = ApiRepository(
+        db_path,
+        mod_index_path=index_path,
+        probe_report_path=report_path,
+    )
+
+    result = repo.mod_index(q="alpha", page=1, page_size=10)
+    item = result["items"][0]
+    assert item["localization_status"] == "partial"
+    assert item["localization_progress"] == 100
+    assert item["localization_status_label"] == "完全汉化"
+
+    partial = repo.mod_index(localization_status="partial", page=1, page_size=10)
+    assert partial["total"] == 0
+
+    complete = repo.mod_index(localization_status="complete", page=1, page_size=10)
+    assert [item["name"] for item in complete["items"]] == ["Alpha Mod"]
