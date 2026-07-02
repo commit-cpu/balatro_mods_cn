@@ -18,6 +18,7 @@ from app.cli.main import (
     set_translation_progress_callback,
     app,
 )
+from app.cli.incremental_translation import IncrementalContextResult
 from app.config import load_settings
 from app.lua.extractor import TranslationUnit
 from app.lua.grouping import TranslationEntry
@@ -178,6 +179,8 @@ def test_build_style_pack_command_writes_json(monkeypatch, tmp_path) -> None:
     )
 
     assert result.exit_code == 0, result.output
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["ok"] is True
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["categories"]["joker"]["available_count"] == 12
     assert "Style pack categories=1" in result.output
@@ -1791,6 +1794,120 @@ def test_translate_entry_preview_mod_skips_missing_name_prepass_for_context_prev
     row = json.loads(output.read_text(encoding="utf-8"))
     assert row["name"] == "未种子名称"
     assert name_prepass_calls == []
+
+
+def test_translate_entry_preview_mod_filters_large_context_preview_to_related_names(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+    keys_file = tmp_path / "rerun_keys.txt"
+    keys_file.write_text("descriptions.Joker.j_missing\n", encoding="utf-8")
+    context_preview = tmp_path / "base_preview.jsonl"
+    rows = [
+        {
+            "entry_key": "descriptions.Joker.j_buddy",
+            "ok": True,
+            "needs_review": False,
+            "source": {"name": "Buddy", "text": ["Existing Buddy text"], "unlock": []},
+            "name": "伙伴",
+            "text": ["既有伙伴文本"],
+            "unlock": [],
+        }
+    ]
+    rows.extend(
+        {
+            "entry_key": f"descriptions.Joker.j_unrelated_{index}",
+            "ok": True,
+            "needs_review": False,
+            "source": {
+                "name": f"Unrelated {index}",
+                "text": [f"Existing unrelated text {index}"],
+                "unlock": [],
+            },
+            "name": f"无关{index}",
+            "text": [f"既有无关文本{index}"],
+            "unlock": [],
+        }
+        for index in range(30)
+    )
+    context_preview.write_text(
+        "\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Joker.j_missing.name", "Missing"),
+                FakeUnit("descriptions.Joker.j_missing.text[0]", "Works with Buddy"),
+            ]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate_entry(self, *, style_examples, **kwargs):
+            assert "Buddy -> 伙伴" in style_examples
+            assert "j_unrelated_0" not in style_examples
+            assert "Existing unrelated text 0" not in style_examples
+
+            class Result:
+                name = "缺失"
+                text = ["与伙伴配合"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr("app.cli.main._entry_style_examples", lambda **kwargs: "")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--entry-keys-file",
+            str(keys_file),
+            "--context-preview",
+            str(context_preview),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["ok"] is True
 
 
 def test_translate_entry_preview_mod_uses_brief_name_seed(
@@ -3877,6 +3994,243 @@ def test_translate_entry_loop_runs_full_then_rerun_until_clean(monkeypatch, tmp_
     assert brief["name_map"] == {"One": "一"}
     assert "Translation loop complete" in result.output
     assert "stopped_reason=no_rerun_keys" in result.output
+
+
+def test_translate_entry_loop_uses_incremental_first_round_for_existing_target(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    repo = tmp_path / "Pokermon"
+    loc = repo / "localization"
+    loc.mkdir(parents=True)
+    (loc / "en-us.lua").write_text("return {}\n", encoding="utf-8")
+    (loc / "zh_CN.lua").write_text("-- existing zh\n", encoding="utf-8")
+    work_dir = tmp_path / "loop"
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_build_incremental_context(source_path, target_path):
+        assert source_path == loc / "en-us.lua"
+        assert target_path == loc / "zh_CN.lua"
+        return IncrementalContextResult(
+            context_rows=[
+                {
+                    "entry_key": "descriptions.Joker.j_existing",
+                    "ok": True,
+                    "source": {"name": "Existing"},
+                    "name": "既有",
+                }
+            ],
+            missing_entry_keys=["descriptions.Joker.j_missing"],
+            missing_unit_keys=["descriptions.Joker.j_missing.text[0]"],
+            source_unit_count=2,
+            target_unit_count=1,
+        )
+
+    def fake_translate_entry_preview_mod(**kwargs):
+        calls.append(("translate", kwargs))
+        assert kwargs["entry_keys_file"] == work_dir / "round_00_missing_entry_keys.txt"
+        assert kwargs["context_preview"] == work_dir / "round_00_context_preview.jsonl"
+        assert kwargs["context_preview"].read_text(encoding="utf-8").strip()
+        assert kwargs["entry_keys_file"].read_text(encoding="utf-8").splitlines() == [
+            "descriptions.Joker.j_missing"
+        ]
+        out = kwargs["output"]
+        assert isinstance(out, Path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps(
+                {
+                    "entry_key": "descriptions.Joker.j_missing",
+                    "ok": True,
+                    "needs_review": False,
+                    "target_units": {
+                        "name": "descriptions.Joker.j_missing.name",
+                        "text": ["descriptions.Joker.j_missing.text[0]"],
+                        "unlock": [],
+                    },
+                    "name": "缺失",
+                    "text": ["补齐"],
+                    "unlock": [],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def fake_apply_missing_entry_preview(**kwargs):
+        calls.append(("apply_missing", kwargs))
+        assert kwargs["target"] == loc / "zh_CN.lua"
+        assert kwargs["missing_unit_keys"] == work_dir / "round_00_missing_unit_keys.txt"
+        assert kwargs["missing_unit_keys"].read_text(encoding="utf-8").splitlines() == [
+            "descriptions.Joker.j_missing.text[0]"
+        ]
+        assert kwargs["require_all_missing"] is False
+        out = kwargs["output"]
+        assert isinstance(out, Path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("-- preserved existing + missing\n", encoding="utf-8")
+
+    def fail_apply_entry_preview(**_kwargs):
+        raise AssertionError("existing target must use incremental apply")
+
+    def fake_audit_entry_output(**kwargs):
+        calls.append(("audit", kwargs))
+        kwargs["json_output"].write_text(
+            json.dumps(
+                {
+                    "summary": {"needs_review": 0, "residual_english": 0},
+                    "failed_rows": [],
+                    "needs_review_rows": [],
+                    "residual_english": [],
+                    "untranslated_units": [],
+                    "label_name_mismatches": [],
+                    "name_inconsistencies": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr("app.cli.main.build_incremental_context", fake_build_incremental_context)
+    monkeypatch.setattr(
+        "app.cli.main.translate_entry_preview_mod", fake_translate_entry_preview_mod
+    )
+    monkeypatch.setattr(
+        "app.cli.main.apply_missing_entry_preview", fake_apply_missing_entry_preview
+    )
+    monkeypatch.setattr("app.cli.main.apply_entry_preview", fail_apply_entry_preview)
+    monkeypatch.setattr("app.cli.main.audit_entry_output", fake_audit_entry_output)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-loop",
+            "--repo",
+            str(repo),
+            "--source",
+            "localization/en-us.lua",
+            "--output",
+            "localization/zh_CN.lua",
+            "--work-dir",
+            str(work_dir),
+            "--max-rounds",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [name for name, _ in calls] == ["translate", "apply_missing", "audit"]
+    assert (repo / "localization" / "zh_CN.lua").read_text(encoding="utf-8") == (
+        "-- preserved existing + missing\n"
+    )
+
+
+def test_translate_entry_loop_uses_target_baseline_when_output_is_candidate(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    repo = tmp_path / "Pokermon"
+    loc = repo / "localization"
+    loc.mkdir(parents=True)
+    (loc / "en-us.lua").write_text("return {}\n", encoding="utf-8")
+    (loc / "zh_CN.lua").write_text("-- existing zh\n", encoding="utf-8")
+    work_dir = tmp_path / "loop"
+    output = work_dir / "candidate_zh_CN.lua"
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def fake_build_incremental_context(source_path, target_path):
+        assert source_path == loc / "en-us.lua"
+        assert target_path == loc / "zh_CN.lua"
+        return IncrementalContextResult(
+            context_rows=[],
+            missing_entry_keys=["descriptions.Joker.j_missing"],
+            missing_unit_keys=["descriptions.Joker.j_missing.text[0]"],
+            source_unit_count=2,
+            target_unit_count=1,
+        )
+
+    def fake_translate_entry_preview_mod(**kwargs):
+        calls.append(("translate", kwargs))
+        assert kwargs["entry_keys_file"] == work_dir / "round_00_missing_entry_keys.txt"
+        assert kwargs["context_preview"] == work_dir / "round_00_context_preview.jsonl"
+        kwargs["output"].parent.mkdir(parents=True, exist_ok=True)
+        kwargs["output"].write_text(
+            json.dumps(
+                {
+                    "entry_key": "descriptions.Joker.j_missing",
+                    "ok": True,
+                    "needs_review": False,
+                    "target_units": {
+                        "name": "descriptions.Joker.j_missing.name",
+                        "text": ["descriptions.Joker.j_missing.text[0]"],
+                        "unlock": [],
+                    },
+                    "name": "缺失",
+                    "text": ["补齐"],
+                    "unlock": [],
+                },
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def fake_apply_missing_entry_preview(**kwargs):
+        calls.append(("apply_missing", kwargs))
+        assert kwargs["target"] == loc / "zh_CN.lua"
+        assert kwargs["output"] == work_dir / "round_00_zh_CN.lua"
+        kwargs["output"].write_text("-- candidate from existing zh\n", encoding="utf-8")
+
+    def fake_audit_entry_output(**kwargs):
+        calls.append(("audit", kwargs))
+        kwargs["json_output"].write_text(
+            json.dumps(
+                {
+                    "summary": {"needs_review": 0, "residual_english": 0},
+                    "failed_rows": [],
+                    "needs_review_rows": [],
+                    "residual_english": [],
+                    "untranslated_units": [],
+                    "label_name_mismatches": [],
+                    "name_inconsistencies": [],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr("app.cli.main.build_incremental_context", fake_build_incremental_context)
+    monkeypatch.setattr(
+        "app.cli.main.translate_entry_preview_mod", fake_translate_entry_preview_mod
+    )
+    monkeypatch.setattr(
+        "app.cli.main.apply_missing_entry_preview", fake_apply_missing_entry_preview
+    )
+    monkeypatch.setattr("app.cli.main.audit_entry_output", fake_audit_entry_output)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-loop",
+            "--repo",
+            str(repo),
+            "--source",
+            "localization/en-us.lua",
+            "--target",
+            "localization/zh_CN.lua",
+            "--output",
+            str(output),
+            "--work-dir",
+            str(work_dir),
+            "--max-rounds",
+            "1",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [name for name, _ in calls] == ["translate", "apply_missing", "audit"]
+    assert output.read_text(encoding="utf-8") == "-- candidate from existing zh\n"
 
 
 def test_translate_entry_loop_resumes_from_completed_manifest(monkeypatch, tmp_path) -> None:

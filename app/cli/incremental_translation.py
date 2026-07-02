@@ -60,12 +60,17 @@ def apply_missing_preview_to_source(
     target_path: Path,
     preview_rows: list[dict[str, Any]],
     missing_unit_keys: set[str],
+    include_needs_review: bool = False,
+    require_all_missing: bool = True,
 ) -> tuple[bytes, dict[str, int]]:
     source_bytes = source_path.read_bytes()
     source_units = LuaExtractor().extract_file(source_path)
     target_units = LuaExtractor().extract_file(target_path) if target_path.exists() else []
     target_by_key = {unit.unit_key: unit.source_text for unit in target_units}
-    preview_translations = _preview_translation_map(preview_rows)
+    preview_translations = _preview_translation_map(
+        preview_rows,
+        include_needs_review=include_needs_review,
+    )
 
     instructions: list[PatchInstruction] = []
     filled_missing = 0
@@ -77,9 +82,12 @@ def apply_missing_preview_to_source(
         if unit.unit_key in missing_unit_keys:
             value = preview_translations.get(unit.unit_key)
             if not isinstance(value, str):
-                errors.append(f"missing preview translation: {unit.unit_key}")
-                continue
-            filled_missing += 1
+                if require_all_missing:
+                    errors.append(f"missing preview translation: {unit.unit_key}")
+                    continue
+                value = target_by_key.get(unit.unit_key, unit.source_text)
+            else:
+                filled_missing += 1
         else:
             value = target_by_key.get(unit.unit_key, unit.source_text)
         instructions.append(
@@ -170,10 +178,16 @@ def _complete_valid_field(
     return values
 
 
-def _preview_translation_map(rows: list[dict[str, Any]]) -> dict[str, str]:
+def _preview_translation_map(
+    rows: list[dict[str, Any]],
+    *,
+    include_needs_review: bool = False,
+) -> dict[str, str]:
     translations: dict[str, str] = {}
     for row in rows:
-        if row.get("ok") is not True or row.get("needs_review") is True:
+        if row.get("ok") is not True:
+            continue
+        if row.get("needs_review") is True and not include_needs_review:
             continue
         target_units = row.get("target_units")
         if not isinstance(target_units, dict):

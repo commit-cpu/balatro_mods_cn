@@ -82,6 +82,8 @@ const I18N = {
     "admin.round": "轮次",
     "admin.progress": "进度",
     "admin.total": "总数",
+    "admin.missingEntries": "缺失条目",
+    "admin.missingUnits": "缺失文本",
     "admin.applyDone": "已写入 zh_CN.lua",
     "admin.publishDone": "已提交到 Fork",
     "admin.notLocal": "该模组还没有本地翻译源，启动翻译时会先下载 localization 文件",
@@ -207,6 +209,8 @@ const I18N = {
     "admin.round": "round",
     "admin.progress": "progress",
     "admin.total": "total",
+    "admin.missingEntries": "missing entries",
+    "admin.missingUnits": "missing text",
     "admin.applyDone": "zh_CN.lua written",
     "admin.publishDone": "Committed to fork",
     "admin.notLocal": "This mod has no local source yet; translation will download localization files first",
@@ -255,6 +259,7 @@ const JOB_EVENT_LABELS = {
   zh: {
     "translation.loop.start": "循环开始",
     "translation.round.start": "轮次开始",
+    "translation.incremental_context": "增量上下文",
     "translation.preview.start": "准备条目",
     "translation.entry.prepare": "准备引用",
     "translation.entry.queued": "等待翻译",
@@ -292,6 +297,7 @@ const JOB_EVENT_LABELS = {
   en: {
     "translation.loop.start": "Loop start",
     "translation.round.start": "Round start",
+    "translation.incremental_context": "Incremental context",
     "translation.preview.start": "Prepare entries",
     "translation.entry.prepare": "Prepare refs",
     "translation.entry.queued": "Queued",
@@ -1136,6 +1142,12 @@ function jobEventProgressText(event) {
     pieces.push(`${t("admin.progress")} ${payload.written}/${payload.total_entries}`);
   } else if (payload.total_entries) {
     pieces.push(`${t("admin.total")} ${payload.total_entries}`);
+  }
+  if (Number.isFinite(payload.missing_entries)) {
+    pieces.push(`${t("admin.missingEntries")} ${payload.missing_entries}`);
+  }
+  if (Number.isFinite(payload.missing_units)) {
+    pieces.push(`${t("admin.missingUnits")} ${payload.missing_units}`);
   }
   return pieces.join(" · ");
 }

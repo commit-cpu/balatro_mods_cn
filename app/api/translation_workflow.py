@@ -56,6 +56,7 @@ def run_translation_job(db_path: Path, job_id: int, payload: dict[str, Any]) -> 
         translate_entry_loop(
             repo=repo_path,
             source=str(payload["source"]),
+            target=Path(str(payload.get("target") or "localization/zh_CN.lua")),
             output=Path(str(payload["output"])),
             work_dir=work_dir,
             limit=int(payload.get("limit") or 9999),

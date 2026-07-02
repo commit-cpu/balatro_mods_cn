@@ -26,6 +26,7 @@ from app.cli.translation_loop import (
     write_loop_manifest,
 )
 from app.cli.incremental_translation import (
+    IncrementalContextResult,
     apply_missing_preview_to_source,
     build_incremental_context,
 )
@@ -491,6 +492,7 @@ def _complete_resumed_loop(
 def translate_entry_loop(
     repo: Path = typer.Option(..., exists=True, file_okay=False),
     source: str = typer.Option(...),
+    target: Path = typer.Option(Path("localization/zh_CN.lua")),
     output: Path = typer.Option(Path("localization/zh_CN.lua")),
     work_dir: Path | None = typer.Option(None),
     limit: int = typer.Option(9999, min=1),
@@ -514,6 +516,7 @@ def translate_entry_loop(
     )
     current_brief_version = translation_brief_version(translation_brief)
     manifest_path = resolved_work_dir / "manifest.json"
+    target_baseline = target if target.is_absolute() else repo / target
     final_output = output if output.is_absolute() else repo / output
     rounds = []
     previous_preview: Path | None = None
@@ -536,9 +539,17 @@ def translate_entry_loop(
         final_summary = resume_summary if isinstance(resume_summary, dict) else None
         stopped_reason = str(resume_payload.get("stopped_reason") or stopped_reason)
 
+    incremental_apply_base: Path | None = None
+    if rounds and rounds[-1].target.exists():
+        incremental_apply_base = rounds[-1].target
+    elif target_baseline.exists():
+        incremental_apply_base = target_baseline
+    elif final_output.exists():
+        incremental_apply_base = final_output
+
     console.print(
         "Entry translation loop: "
-        f"repo={repo} source={source} output={final_output} "
+        f"repo={repo} source={source} target={target_baseline} output={final_output} "
         f"work_dir={resolved_work_dir} max_rounds={max_rounds} "
         f"limit={limit} top_k={top_k} max_width={max_width} "
         f"concurrency={_llm_concurrency(concurrency)} "
@@ -572,6 +583,7 @@ def translate_entry_loop(
     for round_index in range(start_round, max_rounds):
         artifacts = loop_round_artifacts(resolved_work_dir, round_index)
         rounds.append(artifacts)
+        round_missing_unit_keys: Path | None = None
         console.print(f"[loop round {round_index + 1}/{max_rounds}]")
         _emit_translation_progress(
             "translation.round.start",
@@ -581,6 +593,37 @@ def translate_entry_loop(
         )
 
         if round_index == 0:
+            entry_keys_file = None
+            context_preview = None
+            if incremental_apply_base is not None:
+                context_preview = _loop_incremental_context_preview(
+                    resolved_work_dir,
+                    round_index,
+                )
+                entry_keys_file = _loop_missing_entry_keys(resolved_work_dir, round_index)
+                round_missing_unit_keys = _loop_missing_unit_keys(
+                    resolved_work_dir,
+                    round_index,
+                )
+                context_result = build_incremental_context(
+                    repo / source,
+                    incremental_apply_base,
+                )
+                _write_incremental_context_artifacts(
+                    context_result=context_result,
+                    context_preview=context_preview,
+                    entry_keys_output=entry_keys_file,
+                    unit_keys_output=round_missing_unit_keys,
+                )
+                _emit_translation_progress(
+                    "translation.incremental_context",
+                    "Prepared incremental translation context",
+                    source_units=context_result.source_unit_count,
+                    target_units=context_result.target_unit_count,
+                    context_rows=len(context_result.context_rows),
+                    missing_entries=len(context_result.missing_entry_keys),
+                    missing_units=len(context_result.missing_unit_keys),
+                )
             translate_entry_preview_mod(
                 repo=repo,
                 source=source,
@@ -589,8 +632,8 @@ def translate_entry_loop(
                 top_k=top_k,
                 max_width=max_width,
                 concurrency=concurrency,
-                entry_keys_file=None,
-                context_preview=None,
+                entry_keys_file=entry_keys_file,
+                context_preview=context_preview,
                 brief=resolved_brief_path,
             )
         else:
@@ -630,15 +673,39 @@ def translate_entry_loop(
             max_rounds=max_rounds,
             preview=str(artifacts.preview),
         )
-        apply_entry_preview(
-            repo=repo,
-            source=source,
-            input=artifacts.preview,
-            output=artifacts.target,
-            include_needs_review=include_needs_review,
-            table_level=True,
-            validate_lua=validate_lua,
-        )
+        if incremental_apply_base is not None:
+            if round_missing_unit_keys is None:
+                round_missing_unit_keys = _loop_apply_unit_keys(
+                    resolved_work_dir,
+                    round_index,
+                )
+                round_missing_unit_keys.write_text(
+                    "\n".join(_preview_target_unit_keys(_read_preview_rows(artifacts.preview)))
+                    + "\n",
+                    encoding="utf-8",
+                )
+            apply_missing_entry_preview(
+                repo=repo,
+                source=source,
+                target=incremental_apply_base,
+                input=artifacts.preview,
+                missing_unit_keys=round_missing_unit_keys,
+                output=artifacts.target,
+                include_needs_review=include_needs_review,
+                require_all_missing=False,
+                validate_lua=validate_lua,
+            )
+            incremental_apply_base = artifacts.target
+        else:
+            apply_entry_preview(
+                repo=repo,
+                source=source,
+                input=artifacts.preview,
+                output=artifacts.target,
+                include_needs_review=include_needs_review,
+                table_level=True,
+                validate_lua=validate_lua,
+            )
         _emit_translation_progress(
             "translation.audit.start",
             f"Auditing round {round_index + 1}",
@@ -740,6 +807,62 @@ def translate_entry_loop(
         output=str(final_output),
         manifest=str(manifest_path),
     )
+
+
+def _loop_incremental_context_preview(work_dir: Path, round_index: int) -> Path:
+    return work_dir / f"round_{round_index:02d}_context_preview.jsonl"
+
+
+def _loop_missing_entry_keys(work_dir: Path, round_index: int) -> Path:
+    return work_dir / f"round_{round_index:02d}_missing_entry_keys.txt"
+
+
+def _loop_missing_unit_keys(work_dir: Path, round_index: int) -> Path:
+    return work_dir / f"round_{round_index:02d}_missing_unit_keys.txt"
+
+
+def _loop_apply_unit_keys(work_dir: Path, round_index: int) -> Path:
+    return work_dir / f"round_{round_index:02d}_apply_unit_keys.txt"
+
+
+def _write_incremental_context_artifacts(
+    *,
+    context_result: IncrementalContextResult,
+    context_preview: Path,
+    entry_keys_output: Path,
+    unit_keys_output: Path,
+) -> None:
+    context_preview.parent.mkdir(parents=True, exist_ok=True)
+    with context_preview.open("w", encoding="utf-8") as file:
+        for row in context_result.context_rows:
+            file.write(json.dumps(row, ensure_ascii=False) + "\n")
+    entry_keys_output.write_text(
+        "\n".join(context_result.missing_entry_keys)
+        + ("\n" if context_result.missing_entry_keys else ""),
+        encoding="utf-8",
+    )
+    unit_keys_output.write_text(
+        "\n".join(context_result.missing_unit_keys)
+        + ("\n" if context_result.missing_unit_keys else ""),
+        encoding="utf-8",
+    )
+
+
+def _preview_target_unit_keys(rows: list[dict[str, object]]) -> list[str]:
+    keys: set[str] = set()
+    for row in rows:
+        target_units = row.get("target_units")
+        if not isinstance(target_units, dict):
+            continue
+        name_key = target_units.get("name")
+        if isinstance(name_key, str):
+            keys.add(name_key)
+        for field in ("text", "unlock"):
+            values = target_units.get(field)
+            if not isinstance(values, list):
+                continue
+            keys.update(value for value in values if isinstance(value, str))
+    return sorted(keys)
 
 
 @app.command("apply-entry-preview")
@@ -905,6 +1028,8 @@ def apply_missing_entry_preview(
     input: Path = typer.Option(..., exists=True, dir_okay=False),
     missing_unit_keys: Path = typer.Option(..., exists=True, dir_okay=False),
     output: Path = typer.Option(Path("localization/zh_CN.lua")),
+    include_needs_review: bool = typer.Option(False),
+    require_all_missing: bool = typer.Option(True),
     validate_lua: bool = typer.Option(True),
 ) -> None:
     """Apply only missing unit translations, preserving existing zh values."""
@@ -921,6 +1046,8 @@ def apply_missing_entry_preview(
             target_path=target_path,
             preview_rows=_read_preview_rows(input),
             missing_unit_keys=_read_unit_key_set(missing_unit_keys),
+            include_needs_review=include_needs_review,
+            require_all_missing=require_all_missing,
         )
     except ValueError as exc:
         console.print(f"Missing preview apply failed: {exc}")
@@ -1201,7 +1328,6 @@ def translate_entry_preview_mod(
     name_context = _join_prompt_contexts(
         render_brief_context(translation_brief),
         _render_mod_name_glossary(work_items, pretranslated_names),
-        _render_preview_translation_context(context_rows),
     )
     console.print(
         f"Name glossary entries={len(pretranslated_names)} "
@@ -1240,6 +1366,7 @@ def translate_entry_preview_mod(
                     brief_version=brief_version,
                     group=group,
                     name_context=name_context,
+                    context_rows=context_rows,
                     pretranslated_names=pretranslated_names,
                 ): group
                 for group in work_groups
@@ -2261,6 +2388,10 @@ def _translate_mod_entry_names(
     if not name_items:
         return dict(seed_names), 0
 
+    console.print(
+        "Name pretranslation start: "
+        f"total={len(name_items)} seeded={len(seed_names)}"
+    )
     _emit_translation_progress(
         "translation.name_glossary.start",
         f"Pretranslating names for {len(name_items)} entr{'y' if len(name_items) == 1 else 'ies'}",
@@ -2294,6 +2425,7 @@ def _translate_mod_entry_names(
     names: dict[str, str] = dict(seed_names)
     failures = 0
     completed = 0
+    log_interval = max(1, min(50, len(name_items) // 20 or 1))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(translate_name, item) for item in name_items]
         for future in as_completed(futures):
@@ -2309,6 +2441,10 @@ def _translate_mod_entry_names(
                     total=len(name_items),
                     failures=failures,
                 )
+                console.print(
+                    "Name pretranslation failed: "
+                    f"{completed}/{len(name_items)} failures={failures}"
+                )
                 continue
             if target_name is None:
                 failures += 1
@@ -2320,6 +2456,10 @@ def _translate_mod_entry_names(
                     entry_key=entry_key,
                     failures=failures,
                 )
+                console.print(
+                    "Name pretranslation failed: "
+                    f"{completed}/{len(name_items)} failures={failures} entry={entry_key}"
+                )
                 continue
             names[entry_key] = target_name
             _emit_translation_progress(
@@ -2330,6 +2470,15 @@ def _translate_mod_entry_names(
                 entry_key=entry_key,
                 failures=failures,
             )
+            if (
+                completed == 1
+                or completed == len(name_items)
+                or completed % log_interval == 0
+            ):
+                console.print(
+                    "Name pretranslation progress: "
+                    f"{completed}/{len(name_items)} failures={failures}"
+                )
     return names, failures
 
 
@@ -2632,6 +2781,7 @@ def _translate_entry_work_group(
     brief_version: str,
     group: EntryWorkGroup,
     name_context: str = "",
+    context_rows: list[dict[str, object]] | None = None,
     pretranslated_names: dict[str, str] | None = None,
 ) -> tuple[
     dict[int, dict[str, object]],
@@ -2644,6 +2794,9 @@ def _translate_entry_work_group(
 
     for item in group.items:
         group_context = _render_group_translation_context(prior_rows)
+        preview_context = _render_preview_translation_context(
+            _preview_context_rows_for_item(item, context_rows or [])
+        )
         try:
             row = _translate_entry_preview_row(
                 client_factory=client_factory,
@@ -2660,6 +2813,7 @@ def _translate_entry_work_group(
                 style_examples=_append_translation_contexts(
                     item.style_examples,
                     name_context,
+                    preview_context,
                     group_context,
                 ),
                 pretranslated_name=pretranslated_names.get(item.entry.entry_key),
@@ -2692,6 +2846,44 @@ def _append_translation_contexts(style_examples: str, *contexts: str) -> str:
 
 def _join_prompt_contexts(*contexts: str) -> str:
     return "\n\n".join(context for context in contexts if context)
+
+
+_PREVIEW_CONTEXT_FILTER_THRESHOLD = 20
+_PREVIEW_CONTEXT_RELEVANT_LIMIT = 32
+
+
+def _preview_context_rows_for_item(
+    item: EntryWorkItem,
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    accepted_rows = [
+        row for row in rows if row.get("ok") is True and row.get("needs_review") is not True
+    ]
+    if len(accepted_rows) <= _PREVIEW_CONTEXT_FILTER_THRESHOLD:
+        return accepted_rows
+
+    haystack = _entry_glossary_query(item.entry, item.body_text)
+    item_source_name = (
+        item.entry.name.source_text if item.entry.name is not None else ""
+    )
+    relevant: list[dict[str, object]] = []
+    for row in accepted_rows:
+        source = row.get("source")
+        if not isinstance(source, dict):
+            continue
+        source_name = source.get("name")
+        if not isinstance(source_name, str) or not source_name.strip():
+            continue
+        if source_name.casefold() == item_source_name.casefold():
+            relevant.append(row)
+        elif _is_specific_source_name(source_name) and _source_name_referenced(
+            haystack,
+            source_name,
+        ):
+            relevant.append(row)
+        if len(relevant) >= _PREVIEW_CONTEXT_RELEVANT_LIMIT:
+            break
+    return relevant
 
 
 def _render_preview_translation_context(rows: list[dict[str, object]]) -> str:
