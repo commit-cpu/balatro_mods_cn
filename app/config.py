@@ -75,6 +75,10 @@ class EmbeddingSettings:
     base_url: str
     model: str
     batch_size: int
+    api_key_env: str
+    dimensions: int | None
+    instruction: str
+    failover_enabled: bool
 
 
 @dataclass(frozen=True)

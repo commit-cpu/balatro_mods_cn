@@ -29,6 +29,10 @@ embedding:
   base_url: http://127.0.0.1:11434
   model: qwen3-embedding:8b
   batch_size: 16
+  api_key_env: EMBEDDING_API_KEY
+  dimensions:
+  instruction: ""
+  failover_enabled: false
 
 reranker:
   model: BAAI/bge-reranker-v2-m3

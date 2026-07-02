@@ -6,6 +6,7 @@ import time
 
 from app.cli.main import (
     _apply_preview_consistency,
+    _embedding_client,
     _entry_apply_mode,
     _entry_patchability,
     _entry_style_examples,
@@ -17,6 +18,7 @@ from app.cli.main import (
     set_translation_progress_callback,
     app,
 )
+from app.config import load_settings
 from app.lua.extractor import TranslationUnit
 from app.lua.grouping import TranslationEntry
 from app.cli.translation_loop import loop_round_artifacts, write_loop_manifest
@@ -42,6 +44,64 @@ def test_cli_has_rag_commands() -> None:
     assert "rag-preview-mod" in result.output
     assert "translate-preview-mod" in result.output
     assert "translate-entry-preview-mod" in result.output
+
+
+def test_embedding_client_uses_openai_compatible_provider(monkeypatch, tmp_path) -> None:
+    config = tmp_path / "app.yml"
+    config.write_text(
+        """
+app: {env: development, data_dir: ./data}
+api: {host: 127.0.0.1, port: 8000}
+worker:
+  name: worker
+  poll_interval_seconds: 5
+  max_retry_attempts: 3
+  job_visibility_timeout_seconds: 900
+sqlite:
+  database_path: ./data/test.db
+  busy_timeout_ms: 5000
+  journal_mode: WAL
+  synchronous: NORMAL
+qdrant:
+  url: http://127.0.0.1:6333
+  grpc_url: http://127.0.0.1:6334
+  collection: tm_test
+  timeout_seconds: 30
+embedding:
+  provider: openai-compatible
+  base_url: https://ai.gitee.com/v1
+  model: Qwen3-Embedding-8B
+  batch_size: 16
+  api_key_env: GITEE_AI_API_KEY
+  dimensions: 4096
+  instruction: 检索 Balatro 汉化术语
+  failover_enabled: true
+reranker: {model: BAAI/bge-reranker-v2-m3, device: cuda, use_fp16: true}
+rag: {dense_top_k: 30, fts_top_k: 20, rerank_top_k: 16, reference_limit: 4}
+llm: {base_url: https://api.openai.com/v1, translation_model: gpt-4.1-mini, review_model: gpt-4.1-mini}
+git:
+  repos_dir: ./data/repos
+  clone_timeout_seconds: 600
+  default_branch: main
+  http_proxy:
+  https_proxy:
+  no_proxy:
+github: {bot_owner: bot}
+scheduler: {enabled: false, poll_minutes: 360}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("GITEE_AI_API_KEY", "test-key")
+    monkeypatch.setattr("app.cli.main.load_settings", lambda: load_settings(config))
+
+    client = _embedding_client()
+
+    assert client._base_url == "https://ai.gitee.com/v1"
+    assert client._api_key == "test-key"
+    assert client._model == "Qwen3-Embedding-8B"
+    assert client._dimensions == 4096
+    assert client._instruction == "检索 Balatro 汉化术语"
+    assert client._failover_enabled is True
 
 
 def test_runtime_generated_entry_is_not_patchable() -> None:

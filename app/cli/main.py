@@ -56,7 +56,7 @@ from app.lua.patcher import LuaPatcher, PatchInstruction
 from app.lua.string_literals import escape_lua_string_content
 from app.lua.table_writer import EntryTableTranslation, build_entry_table_patches
 from app.lua.validator import validate_file
-from app.rag.ollama_embeddings import OllamaEmbeddingClient
+from app.rag.ollama_embeddings import OllamaEmbeddingClient, OpenAICompatibleEmbeddingClient
 from app.rag.glossary import retrieve_glossary_references
 from app.rag.mod_terms import scan_mod_term_candidates
 from app.rag.qdrant_store import QdrantTmStore
@@ -151,10 +151,7 @@ def import_local_tm(
 @app.command("sync-vectors")
 def sync_vectors(limit: int = typer.Option(100, min=1)) -> None:
     settings = load_settings()
-    embedder = OllamaEmbeddingClient(
-        base_url=settings.embedding.base_url,
-        model=settings.embedding.model,
-    )
+    embedder = _embedding_client()
     store = _qdrant_store()
     store.ensure_collection(embedder.embedding_dimension())
     result = sync_vector_outbox(
@@ -178,10 +175,7 @@ def qdrant_status() -> None:
 @app.command()
 def search(query: str, top_k: int = typer.Option(5, min=1)) -> None:
     settings = load_settings()
-    embedder = OllamaEmbeddingClient(
-        base_url=settings.embedding.base_url,
-        model=settings.embedding.model,
-    )
+    embedder = _embedding_client()
     store = _qdrant_store()
     result = retrieve_references(
         db_path=Path(settings.sqlite.database_path),
@@ -959,10 +953,7 @@ def rag_preview_mod(
     settings = load_settings()
     source_path = repo / source
     units = LuaExtractor().extract_file(source_path)[:limit]
-    embedder = OllamaEmbeddingClient(
-        base_url=settings.embedding.base_url,
-        model=settings.embedding.model,
-    )
+    embedder = _embedding_client()
     store = _qdrant_store()
 
     console.print(f"Previewing {len(units)} units from {source_path}")
@@ -1005,10 +996,7 @@ def translate_preview_mod(
     settings = load_settings()
     source_path = repo / source
     units = LuaExtractor().extract_file(source_path)[:limit]
-    embedder = OllamaEmbeddingClient(
-        base_url=settings.embedding.base_url,
-        model=settings.embedding.model,
-    )
+    embedder = _embedding_client()
     store = _qdrant_store()
     llm_base_url, llm_model = _llm_config()
     translator = Translator(client=_llm_client(), model=llm_model)
@@ -1082,10 +1070,7 @@ def translate_entry_preview_mod(
         entries = [entry for entry in all_entries if entry.entry_key in entry_filter]
     else:
         entries = all_entries[:limit]
-    embedder = OllamaEmbeddingClient(
-        base_url=settings.embedding.base_url,
-        model=settings.embedding.model,
-    )
+    embedder = _embedding_client()
     store = _qdrant_store()
     llm_base_url, llm_model = _llm_config()
     db_path = Path(settings.sqlite.database_path)
@@ -1907,6 +1892,33 @@ def _qdrant_store() -> QdrantTmStore:
         collection=settings.qdrant.collection,
         timeout=settings.qdrant.timeout_seconds,
     )
+
+
+def _embedding_client():
+    load_dotenv()
+    settings = load_settings()
+    provider = settings.embedding.provider.casefold()
+    if provider == "ollama":
+        return OllamaEmbeddingClient(
+            base_url=settings.embedding.base_url,
+            model=settings.embedding.model,
+        )
+    if provider in {"openai-compatible", "openai"}:
+        api_key = os.environ.get(settings.embedding.api_key_env)
+        if not api_key:
+            raise typer.BadParameter(
+                f"{settings.embedding.api_key_env} is required for "
+                f"embedding provider {settings.embedding.provider}"
+            )
+        return OpenAICompatibleEmbeddingClient(
+            base_url=settings.embedding.base_url,
+            api_key=api_key,
+            model=settings.embedding.model,
+            dimensions=settings.embedding.dimensions,
+            instruction=settings.embedding.instruction,
+            failover_enabled=settings.embedding.failover_enabled,
+        )
+    raise typer.BadParameter(f"Unsupported embedding provider: {settings.embedding.provider}")
 
 
 def _llm_client() -> OpenAICompatibleClient:

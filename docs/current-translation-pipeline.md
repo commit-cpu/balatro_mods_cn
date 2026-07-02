@@ -12,7 +12,8 @@
 项目目前处于“知识库 + RAG 翻译预览”阶段：
 
 - 已能从已有中英 Lua 本地化文件导入翻译记忆到 SQLite。
-- 已能用 Ollama `qwen3-embedding:8b` 生成 embedding，并同步到 Qdrant。
+- 已能用配置的 embedding provider 生成 embedding，并同步到 Qdrant；默认是
+  Ollama `qwen3-embedding:8b`，也支持 OpenAI-compatible `/embeddings` API。
 - 已能对未翻译模组做 RAG 检索预览。
 - 已能调用 OpenAI-compatible LLM API 生成 entry 级翻译预览 JSONL。
 - 已能保护 Balatro token，校验 LLM 输出是否破坏 token。
@@ -55,7 +56,8 @@
 - SQLite：`data/balatro_cn.db`
 - Qdrant：`http://127.0.0.1:6333`
 - Qdrant collection：`tm_qwen3_embedding_8b_v1`
-- Embedding：Ollama `qwen3-embedding:8b`
+- Embedding：默认 Ollama `qwen3-embedding:8b`；也支持 OpenAI-compatible
+  `/embeddings` API，例如 Gitee AI `Qwen3-Embedding-8B`
 - LLM：通过 `LLM_BASE_URL` 使用 OpenAI-compatible `/chat/completions`
 
 主要环境变量：
@@ -70,6 +72,23 @@ LLM_CONCURRENCY=1
 
 `LLM_CONCURRENCY` 默认是 `1`。CLI 的 `--concurrency` 会覆盖环境变量。
 
+线上 embedding API 可通过 `config/app.yml` 切换：
+
+```yaml
+embedding:
+  provider: openai-compatible
+  base_url: https://ai.gitee.com/v1
+  model: Qwen3-Embedding-8B
+  batch_size: 16
+  api_key_env: EMBEDDING_API_KEY
+  dimensions: 4096
+  instruction: "指令：用于 Balatro 汉化 translation memory 检索。"
+  failover_enabled: true
+```
+
+`EMBEDDING_API_KEY` 放在 `.env` 或环境变量中；`failover_enabled` 会发送
+`X-Failover-Enabled: true`。
+
 ## 知识库流程
 
 知识库以 SQLite 作为事实源，以 Qdrant 作为可重建的向量索引。
@@ -79,7 +98,7 @@ LLM_CONCURRENCY=1
 3. 导入时按相同 `unit_key` 对齐 source/target。
 4. token 不一致的条目会被跳过，避免污染翻译记忆。
 5. 合格条目写入 `tm_entries`，并写入 `vector_outbox`。
-6. `sync-vectors` 读取 outbox，调用 Ollama embedding，再 upsert 到 Qdrant。
+6. `sync-vectors` 读取 outbox，调用配置的 embedding provider，再 upsert 到 Qdrant。
 7. `search` 和 preview 命令通过 Qdrant 取回相似翻译记忆。
 
 当前已经验证过的知识库中包含原版术语，例如：

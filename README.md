@@ -93,6 +93,9 @@ GITHUB_TOKEN=replace_me
 
 QDRANT_API_KEY=replace_me
 QDRANT_READ_ONLY_API_KEY=replace_me
+
+# 仅当使用线上 OpenAI-compatible embedding 服务时需要。
+EMBEDDING_API_KEY=replace_me
 ```
 
 Git/GitHub 访问代理：
@@ -141,6 +144,24 @@ curl -H "api-key: ${QDRANT_API_KEY}" http://127.0.0.1:6333/collections
 curl http://127.0.0.1:11434/api/embed \
   -d '{"model":"qwen3-embedding:8b","input":"test"}'
 ```
+
+默认 embedding provider 是本地 Ollama。也可以把 `config/app.yml` 的
+`embedding.provider` 改成 `openai-compatible`，使用线上 `/embeddings` API：
+
+```yaml
+embedding:
+  provider: openai-compatible
+  base_url: https://ai.gitee.com/v1
+  model: Qwen3-Embedding-8B
+  batch_size: 16
+  api_key_env: EMBEDDING_API_KEY
+  dimensions: 4096
+  instruction: "指令：用于 Balatro 汉化 translation memory 检索。"
+  failover_enabled: true
+```
+
+`api_key_env` 指向 `.env` 里的变量名，真实 key 不要写进 `config/app.yml`。
+`failover_enabled: true` 会发送 `X-Failover-Enabled: true` 请求头。
 
 导入已有人工翻译作为 translation memory：
 
@@ -256,4 +277,4 @@ git diff --check
 - 生产环境必须设置 `ADMIN_SECRET_KEY`。
 - GitHub token 需要具备 fork/contents 写入能力。
 - 如果使用代理，确认 GitHub API 和 git clone/fetch 都能走通。
-- 如果要长期运行自动翻译，建议从小队列开始，确认 LLM、Ollama、Qdrant、GitHub token 都稳定后再扩大规模。
+- 如果要长期运行自动翻译，建议从小队列开始，确认 LLM、embedding provider、Qdrant、GitHub token 都稳定后再扩大规模。

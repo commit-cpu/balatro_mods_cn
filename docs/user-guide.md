@@ -124,7 +124,9 @@ GIT_NO_PROXY=127.0.0.1,localhost
 ```
 
 GitHub API calls use normal `httpx` environment/proxy behavior. Ollama embedding
-calls to localhost ignore external proxy settings.
+calls to localhost ignore external proxy settings. If `embedding.provider` is
+`openai-compatible`, embedding requests go to the configured `base_url` and use
+the API key from the env var named by `embedding.api_key_env`.
 
 ## Troubleshooting
 
@@ -141,8 +143,11 @@ calls to localhost ignore external proxy settings.
 
 Translation fails on embeddings:
 
-- Confirm Ollama is running at the configured embedding base URL.
-- Confirm the embedding model exists locally.
+- For `embedding.provider=ollama`, confirm Ollama is running at the configured
+  embedding base URL and the model exists locally.
+- For `embedding.provider=openai-compatible`, confirm `embedding.base_url`,
+  `embedding.model`, `embedding.dimensions`, and the env var named by
+  `embedding.api_key_env` match your provider.
 
 GitHub actions are slow or fail:
 
