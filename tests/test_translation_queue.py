@@ -188,3 +188,74 @@ def test_queue_item_syncs_to_succeeded_after_runner_finishes(tmp_path: Path) -> 
     )
 
     assert repo.get_translation_queue_item(item["id"])["status"] == "succeeded"
+
+
+def test_repository_marks_interrupted_translation_jobs_failed(tmp_path: Path) -> None:
+    db_path = tmp_path / "balatro_cn.db"
+    migrate(db_path)
+    repo = ApiRepository(db_path)
+    payload = {"mod_id": "alpha_mod", "repo_path": "repo", "source": "localization/en-us.lua"}
+    job, created = repo.create_translation_job(mod_id="alpha_mod", payload=payload)
+    assert created is True
+    repo.update_job_status(job["id"], "running")
+
+    existing, created = repo.create_translation_job(mod_id="alpha_mod", payload=payload)
+    assert existing["id"] == job["id"]
+    assert created is False
+
+    interrupted = repo.mark_interrupted_translation_jobs_failed("server restarted")
+
+    assert interrupted == 1
+    failed = repo.get_job(job["id"])
+    assert failed is not None
+    assert failed["status"] == "failed"
+    assert failed["last_error"] == "server restarted"
+    events = repo.list_job_events(job["id"])
+    assert events[-1]["event"] == "translation.loop.interrupted"
+    assert events[-1]["level"] == "warning"
+
+    replacement, created = repo.create_translation_job(mod_id="alpha_mod", payload=payload)
+    assert created is True
+    assert replacement["id"] != job["id"]
+
+
+def test_repository_marks_running_queue_failed_with_interrupted_job(tmp_path: Path) -> None:
+    db_path = tmp_path / "balatro_cn.db"
+    repo_path = tmp_path / "repos" / "alpha"
+    (repo_path / "localization").mkdir(parents=True)
+    (repo_path / "localization" / "en-us.lua").write_text("return {}\n", encoding="utf-8")
+    (repo_path / "localization" / "zh_CN.lua").write_text("return {}\n", encoding="utf-8")
+    migrate(db_path)
+    with connect(db_path) as db:
+        db.execute(
+            """
+            insert into mod_sources(mod_id, repo_path, source_locale_path, target_locale_path)
+            values ('alpha_mod', ?, 'localization/en-us.lua', 'localization/zh_CN.lua')
+            """,
+            (str(repo_path),),
+        )
+        db.commit()
+    repo = ApiRepository(db_path)
+    item = repo.enqueue_translation(
+        mod_id="alpha_mod",
+        source_name="Alpha Mod",
+        repo_url="https://github.com/example/alpha",
+    )
+
+    from app.api.queue_workflow import start_translation_queue_item
+
+    job = start_translation_queue_item(
+        db_path=db_path,
+        queue_id=item["id"],
+        background_tasks=None,
+        translation_runner=lambda db_path, job_id, payload: None,
+    )
+
+    interrupted = repo.mark_interrupted_translation_jobs_failed("server restarted")
+
+    assert interrupted == 1
+    assert repo.get_job(job["id"])["status"] == "failed"
+    queue_item = repo.get_translation_queue_item(item["id"])
+    assert queue_item is not None
+    assert queue_item["status"] == "failed"
+    assert queue_item["last_error"] == "server restarted"

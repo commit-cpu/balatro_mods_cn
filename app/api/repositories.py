@@ -874,6 +874,64 @@ class ApiRepository:
             ).fetchone()
         return job is not None or queue is not None
 
+    def mark_interrupted_translation_jobs_failed(self, reason: str) -> int:
+        with connect(self._db_path) as db:
+            rows = db.execute(
+                """
+                select *
+                from jobs
+                where type = 'translate_entry_loop'
+                  and status in ('pending', 'running')
+                order by id asc
+                """
+            ).fetchall()
+            if not rows:
+                return 0
+            job_ids = [int(row["id"]) for row in rows]
+            placeholders = ",".join("?" for _ in job_ids)
+            db.execute(
+                f"""
+                update jobs
+                set status = 'failed',
+                    last_error = ?,
+                    updated_at = current_timestamp,
+                    finished_at = current_timestamp
+                where id in ({placeholders})
+                """,
+                [reason, *job_ids],
+            )
+            event_rows = [
+                (
+                    job_id,
+                    "warning",
+                    "translation.loop.interrupted",
+                    reason,
+                    json.dumps({"job_id": job_id}, ensure_ascii=False, sort_keys=True),
+                )
+                for job_id in job_ids
+            ]
+            db.executemany(
+                """
+                insert into job_events(job_id, level, event, message, payload_json)
+                values (?, ?, ?, ?, ?)
+                """,
+                event_rows,
+            )
+            db.execute(
+                f"""
+                update translation_queue
+                set status = 'failed',
+                    last_error = ?,
+                    updated_at = current_timestamp,
+                    finished_at = current_timestamp
+                where status = 'running'
+                  and locked_job_id in ({placeholders})
+                """,
+                [reason, *job_ids],
+            )
+            db.commit()
+        return len(job_ids)
+
     def _next_queue_priority(self) -> int:
         with connect(self._db_path) as db:
             row = db.execute(
@@ -906,10 +964,14 @@ class ApiRepository:
             rows = db.execute(
                 """
                 select *
-                from job_events
-                where job_id = ?
+                from (
+                    select *
+                    from job_events
+                    where job_id = ?
+                    order by id desc
+                    limit ?
+                )
                 order by id asc
-                limit ?
                 """,
                 (job_id, limit),
             ).fetchall()

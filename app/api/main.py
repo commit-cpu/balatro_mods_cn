@@ -110,6 +110,9 @@ def create_app(
 
     @app.on_event("startup")
     async def start_translation_queue_scheduler() -> None:
+        app.state.repository.mark_interrupted_translation_jobs_failed(
+            "server restarted before translation job completed; start translation again to resume from artifacts"
+        )
         if not settings.scheduler.enabled:
             return
         app.state.queue_scheduler_stop = False

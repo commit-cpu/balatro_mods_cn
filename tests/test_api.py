@@ -651,6 +651,32 @@ def test_repository_records_job_events(tmp_path: Path) -> None:
     assert events[1]["level"] == "warning"
 
 
+def test_repository_lists_latest_job_events_in_chronological_order(tmp_path: Path) -> None:
+    db_path = tmp_path / "balatro_cn.db"
+    migrate(db_path)
+    repo = ApiRepository(db_path)
+    job, _created = repo.create_github_probe_job(
+        job_type="github_l10n_probe",
+        payload={"mod_name": "Alpha Mod"},
+    )
+    for index in range(5):
+        repo.log_job_event(
+            job["id"],
+            event=f"github.probe.step_{index}",
+            message=f"Step {index}",
+            payload={"index": index},
+        )
+
+    events = repo.list_job_events(job["id"], limit=3)
+
+    assert [event["event"] for event in events] == [
+        "github.probe.step_2",
+        "github.probe.step_3",
+        "github.probe.step_4",
+    ]
+    assert [event["payload"]["index"] for event in events] == [2, 3, 4]
+
+
 def test_materialize_probe_row_localization_downloads_only_locale_files(
     tmp_path: Path,
 ) -> None:
@@ -979,7 +1005,11 @@ def test_manual_translation_start_creates_job_and_runs_injected_runner(
     def fake_runner(db_path: Path, job_id: int, payload: dict[str, Any]) -> None:
         runner_calls.append((job_id, payload))
 
-    client = TestClient(create_app(db_path=db_path, translation_runner=fake_runner))
+    from app.api.admin_auth import require_admin
+
+    app = create_app(db_path=db_path, translation_runner=fake_runner)
+    app.dependency_overrides[require_admin] = lambda: None
+    client = TestClient(app)
     response = client.post("/api/mods/familiar/translate", json={"limit": 20, "max_rounds": 2})
 
     assert response.status_code == 201
@@ -997,6 +1027,53 @@ def test_manual_translation_start_creates_job_and_runs_injected_runner(
     assert len(runner_calls) == 1
     assert runner_calls[0][0] == payload["id"]
     assert runner_calls[0][1]["mod_id"] == "familiar"
+
+
+def test_startup_fails_interrupted_translation_before_manual_restart(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "balatro_cn.db"
+    repo_path = tmp_path / "repos" / "Familiar"
+    (repo_path / "localization").mkdir(parents=True)
+    (repo_path / "localization" / "en-us.lua").write_text(
+        'return { descriptions = { Joker = { j_test = { name = "Test" } } } }\n',
+        encoding="utf-8",
+    )
+    migrate(db_path)
+    with connect(db_path) as db:
+        db.execute(
+            """
+            insert into mod_sources(mod_id, repo_path, source_locale_path, target_locale_path)
+            values ('familiar', ?, 'localization/en-us.lua', 'localization/zh_CN.lua')
+            """,
+            (str(repo_path),),
+        )
+        db.commit()
+    repo = ApiRepository(db_path)
+    stale_job, _ = repo.create_translation_job(
+        mod_id="familiar",
+        payload={"mod_id": "familiar", "repo_path": str(repo_path)},
+    )
+    repo.update_job_status(stale_job["id"], "running")
+    runner_calls: list[int] = []
+
+    def fake_runner(db_path: Path, job_id: int, payload: dict[str, Any]) -> None:
+        runner_calls.append(job_id)
+
+    from app.api.admin_auth import require_admin
+
+    app = create_app(db_path=db_path, translation_runner=fake_runner)
+    app.dependency_overrides[require_admin] = lambda: None
+    with TestClient(app) as client:
+        failed_job = ApiRepository(db_path).get_job(stale_job["id"])
+        assert failed_job is not None
+        assert failed_job["status"] == "failed"
+        response = client.post("/api/mods/familiar/translate", json={"limit": 20})
+
+    assert response.status_code == 201
+    payload = response.json()
+    assert payload["id"] != stale_job["id"]
+    assert runner_calls == [payload["id"]]
 
 
 def test_translation_preview_import_only_queues_rows_that_need_review(

@@ -1631,6 +1631,108 @@ def test_translate_entry_preview_mod_seeds_name_prepass_from_context_preview(
     assert row["name"] == "宝石蓝蜡封"
 
 
+def test_translate_entry_preview_mod_skips_missing_name_prepass_for_context_preview(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    source = tmp_path / "localization" / "default.lua"
+    source.parent.mkdir()
+    source.write_text("return {}", encoding="utf-8")
+    output = tmp_path / "entry_preview.jsonl"
+    keys_file = tmp_path / "rerun_keys.txt"
+    keys_file.write_text("descriptions.Other.fam_unseeded\n", encoding="utf-8")
+    context_preview = tmp_path / "base_preview.jsonl"
+    context_preview.write_text(
+        json.dumps(
+            {
+                "entry_key": "descriptions.Other.other_entry",
+                "ok": True,
+                "needs_review": False,
+                "source": {"name": "Other Name", "text": [], "unlock": []},
+                "name": "其他名称",
+                "text": [],
+                "unlock": [],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class FakeUnit:
+        def __init__(self, unit_key, source_text) -> None:
+            self.unit_key = unit_key
+            self.source_text = source_text
+
+    class FakeExtractor:
+        def extract_file(self, path):
+            return [
+                FakeUnit("descriptions.Other.fam_unseeded.name", "Unseeded Name"),
+                FakeUnit("descriptions.Other.fam_unseeded.text[0]", "Gain Chips"),
+            ]
+
+    class FakeEmbedding:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+    class FakeRetrieval:
+        references = []
+
+    name_prepass_calls: list[str] = []
+
+    class FakeTranslator:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def translate(self, **kwargs):
+            name_prepass_calls.append(str(kwargs.get("source_text")))
+            raise AssertionError("rerun should not pretranslate missing names")
+
+        def translate_entry(self, **kwargs):
+            class Result:
+                name = "未种子名称"
+                text = ["获得筹码"]
+                unlock = []
+                token_errors = []
+
+            return Result()
+
+    monkeypatch.setattr("app.cli.main.LuaExtractor", FakeExtractor)
+    monkeypatch.setattr("app.cli.main.OllamaEmbeddingClient", FakeEmbedding)
+    monkeypatch.setattr("app.cli.main.QdrantTmStore", FakeStore)
+    monkeypatch.setattr("app.cli.main.retrieve_references", lambda **kwargs: FakeRetrieval())
+    monkeypatch.setattr("app.cli.main.retrieve_glossary_references", lambda **kwargs: [])
+    monkeypatch.setattr("app.cli.main.Translator", FakeTranslator)
+    monkeypatch.setattr("app.cli.main._llm_client", lambda: object())
+    monkeypatch.setattr("app.cli.main._entry_style_examples", lambda **kwargs: "")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "translate-entry-preview-mod",
+            "--repo",
+            str(tmp_path),
+            "--source",
+            "localization/default.lua",
+            "--entry-keys-file",
+            str(keys_file),
+            "--context-preview",
+            str(context_preview),
+            "--output",
+            str(output),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    row = json.loads(output.read_text(encoding="utf-8"))
+    assert row["name"] == "未种子名称"
+    assert name_prepass_calls == []
+
+
 def test_translate_entry_preview_mod_uses_brief_name_seed(
     monkeypatch,
     tmp_path,

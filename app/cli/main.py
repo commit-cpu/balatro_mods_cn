@@ -1193,14 +1193,25 @@ def translate_entry_preview_mod(
         _source_names_by_entry(work_items),
         translation_brief,
     )
-    pretranslated_names, name_failures = _translate_mod_entry_names(
-        client_factory=_llm_client,
-        model=llm_model,
-        work_items=work_items,
-        term_map=term_map,
-        max_workers=llm_concurrency,
-        seed_names=seeded_names,
-    )
+    if context_preview is None:
+        pretranslated_names, name_failures = _translate_mod_entry_names(
+            client_factory=_llm_client,
+            model=llm_model,
+            work_items=work_items,
+            term_map=term_map,
+            max_workers=llm_concurrency,
+            seed_names=seeded_names,
+        )
+    else:
+        pretranslated_names = dict(seeded_names)
+        name_failures = 0
+        _emit_translation_progress(
+            "translation.name_glossary.reused",
+            f"Reused name glossary: {len(pretranslated_names)} seeded names",
+            total_entries=len(entries),
+            glossary_entries=len(pretranslated_names),
+            seeded_names=len(seeded_names),
+        )
     pretranslated_names = _canonicalize_pretranslated_names(work_items, pretranslated_names)
     name_context = _join_prompt_contexts(
         render_brief_context(translation_brief),
@@ -2496,6 +2507,7 @@ def _seed_pretranslated_names(
 ) -> dict[str, str]:
     if not context_rows:
         return {}
+    exact_by_entry = _preview_name_targets_by_entry(context_rows)
     by_source = _accepted_preview_name_targets(context_rows)
     seeds: dict[str, str] = {}
     for item in work_items:
@@ -2503,11 +2515,36 @@ def _seed_pretranslated_names(
         source_name = getattr(name_unit, "source_text", None)
         if not isinstance(source_name, str):
             continue
+        exact_target = exact_by_entry.get((item.entry.entry_key, _normalize_audit_term(source_name)))
+        if exact_target is not None:
+            seeds[item.entry.entry_key] = exact_target
+            continue
         targets = by_source.get(_normalize_audit_term(source_name))
         if targets is None or len(targets) != 1:
             continue
         seeds[item.entry.entry_key] = next(iter(targets))
     return seeds
+
+
+def _preview_name_targets_by_entry(
+    rows: list[dict[str, object]],
+) -> dict[tuple[str, str], str]:
+    by_entry: dict[tuple[str, str], str] = {}
+    for row in rows:
+        entry_key = row.get("entry_key")
+        source = row.get("source")
+        target_name = row.get("name")
+        if not isinstance(entry_key, str):
+            continue
+        if not isinstance(source, dict) or not isinstance(target_name, str):
+            continue
+        source_name = source.get("name")
+        if not isinstance(source_name, str) or not source_name.strip():
+            continue
+        if not target_name.strip() or source_name == target_name:
+            continue
+        by_entry[(entry_key, _normalize_audit_term(source_name))] = target_name
+    return by_entry
 
 
 def _source_names_by_entry(work_items: list[EntryWorkItem]) -> dict[str, str]:
